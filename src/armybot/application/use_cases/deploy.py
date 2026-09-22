@@ -1,3 +1,5 @@
+from collections.abc import Callable, Coroutine
+from typing import Any
 from uuid import uuid4
 
 from armybot.application.ports.deploy import DeploymentExecutor, RepoAnalyzer
@@ -5,6 +7,8 @@ from armybot.application.ports.repositories import DeploymentRepository, Project
 from armybot.application.use_cases.credentials import CredentialService
 from armybot.domain.entities import Deployment, Project, User
 from armybot.domain.enums import DeploymentStatus
+
+LogCallback = Callable[[str], Coroutine[Any, Any, None]] | None
 
 
 class DeployProjectService:
@@ -22,7 +26,13 @@ class DeployProjectService:
         self.deployments = deployments
         self.credentials = credentials
 
-    async def deploy(self, user: User, repo_url: str, branch: str = "main") -> Deployment:
+    async def deploy(
+        self,
+        user: User,
+        repo_url: str,
+        branch: str = "main",
+        on_log: LogCallback = None,
+    ) -> Deployment:
         plan = await self.analyzer.analyze(repo_url, branch)
         project = await self.projects.get_by_repo(user.id, repo_url, branch)
         if not project:
@@ -49,7 +59,7 @@ class DeployProjectService:
 
         try:
             secrets = await self.credentials.load_all(user)
-            live_url, logs = await self.executor.deploy(plan, secrets)
+            live_url, logs = await self.executor.deploy(plan, secrets, on_log)
             deployment.live_url = live_url
             deployment.logs.extend(logs)
             deployment.status = DeploymentStatus.Successful

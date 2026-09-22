@@ -13,7 +13,7 @@ class SafeDeploymentExecutor:
     implement the same DeploymentExecutor port without changing application code.
     """
 
-    async def deploy(self, plan: DeploymentPlan, credentials: dict[str, dict]) -> tuple[str | None, list[str]]:
+    async def deploy(self, plan: DeploymentPlan, credentials: dict[str, dict], on_log=None) -> tuple[str | None, list[str]]:
         logs = [
             f"Project: {plan.project_name}",
             f"Branch: {plan.branch}",

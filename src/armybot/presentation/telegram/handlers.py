@@ -351,12 +351,20 @@ async def receive_deploy_repo(message: Message, state: FSMContext) -> None:
     repo_url = args[0]
     branch = args[1] if len(args) > 1 else "main"
     await state.clear()
-    notice = await message.answer("Deployment started. I will report back here.")
+    notice = await message.answer("🚀 Deployment started...")
+
+    async def _live_log(text: str) -> None:
+        try:
+            await notice.edit_text(f"🚀 Deploying...\n\n{text}")
+        except Exception:
+            pass
+
     async with container_scope() as c:
         user = await c.access.require_active(message.from_user.id)
-        deployment = await c.deploy.deploy(user, repo_url, branch)
+        deployment = await c.deploy.deploy(user, repo_url, branch, on_log=_live_log)
     await notice.edit_text(deployment_report(deployment), parse_mode="Markdown")
     await message.answer("What do you want to do next?", reply_markup=main_menu_keyboard(user.is_super_admin))
+
 
 
 @router.message(SetupFlow.waiting_user_to_add)
@@ -473,11 +481,19 @@ async def deploy(message: Message) -> None:
 
     repo_url = args[0]
     branch = args[1] if len(args) > 1 else "main"
-    notice = await message.answer("Deployment started. I will report back here.")
+    notice = await message.answer("🚀 Deployment started...")
+
+    async def _live_log(text: str) -> None:
+        try:
+            await notice.edit_text(f"🚀 Deploying...\n\n{text}")
+        except Exception:
+            pass
+
     async with container_scope() as c:
         user = await c.access.require_active(message.from_user.id)
-        deployment = await c.deploy.deploy(user, repo_url, branch)
+        deployment = await c.deploy.deploy(user, repo_url, branch, on_log=_live_log)
     await notice.edit_text(deployment_report(deployment), parse_mode="Markdown")
+
 
 
 @router.message(Command("projects"))

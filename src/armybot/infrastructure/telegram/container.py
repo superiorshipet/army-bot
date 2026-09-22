@@ -26,6 +26,20 @@ from armybot.infrastructure.security.fernet_box import FernetSecretBox
 from armybot.shared.settings import settings
 
 
+def _build_executor():
+    """Return the appropriate executor based on execution_mode."""
+    if settings.execution_mode == "ai":
+        from armybot.infrastructure.deploy.ai_agent import AIDeployAgent
+
+        return AIDeployAgent(
+            api_key=settings.gemini_api_key,
+            model=settings.gemini_model,
+            max_commands=settings.ai_max_commands,
+            command_timeout=settings.ai_command_timeout,
+        )
+    return SafeDeploymentExecutor()
+
+
 class RequestContainer:
     def __init__(self, session: AsyncSession) -> None:
         self.users = SqlUserRepository(session)
@@ -38,7 +52,7 @@ class RequestContainer:
         self.credentials = CredentialService(self.credentials_repo, self.secret_box)
         self.deploy = DeployProjectService(
             analyzer=FilesystemRepoAnalyzer(),
-            executor=SafeDeploymentExecutor(),
+            executor=_build_executor(),
             projects=self.projects,
             deployments=self.deployments,
             credentials=self.credentials,
@@ -60,7 +74,7 @@ async def container_scope() -> AsyncIterator[RequestContainer]:
         container.credentials = CredentialService(container.credentials_repo, container.secret_box)
         container.deploy = DeployProjectService(
             analyzer=FilesystemRepoAnalyzer(),
-            executor=SafeDeploymentExecutor(),
+            executor=_build_executor(),
             projects=container.projects,
             deployments=container.deployments,
             credentials=container.credentials,

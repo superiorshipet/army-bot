@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     public_base_url: str = ""
     execution_mode: str = "dry_run"
 
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-3.8-flash"
+    ai_max_commands: int = 50
+    ai_command_timeout: int = 120
+
     @cached_property
     def super_admin_ids(self) -> set[int]:
         return {
