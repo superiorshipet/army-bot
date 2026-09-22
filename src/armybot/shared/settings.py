@@ -21,8 +21,11 @@ class Settings(BaseSettings):
     public_base_url: str = ""
     execution_mode: str = "dry_run"
 
+    ai_provider: str = "gemini"
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3.8-flash"
+    groq_api_key: str = ""
+    groq_model: str = "openai/gpt-oss-120b"
     ai_max_commands: int = 50
     ai_command_timeout: int = 120
 

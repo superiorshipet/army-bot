@@ -12,6 +12,10 @@ The AI has full server access and can do anything needed for deployment.
 
 from __future__ import annotations
 
+import asyncio
+import json
+
+import httpx
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -262,14 +266,27 @@ class AIDeployAgent:
         )
 
         while command_count < self.max_commands:
-            response = await self.client.aio.models.generate_content(
-                model=self.model,
-                contents=contents,
-                config=config,
-            )
+            response = None
+            for attempt in range(6):
+                try:
+                    response = await self.client.aio.models.generate_content(
+                        model=self.model,
+                        contents=contents,
+                        config=config,
+                    )
+                    break
+                except Exception as exc:
+                    err_str = str(exc)
+                    if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+                        wait_seconds = 8 + (attempt * 4)
+                        logger.warning("ai_deploy.rate_limit_wait", attempt=attempt, wait_seconds=wait_seconds)
+                        await self._log(on_log, f"⏳ Rate limit reached. Waiting {wait_seconds}s for quota cooldown...")
+                        await asyncio.sleep(wait_seconds)
+                    else:
+                        raise
 
-            if not response.candidates:
-                logs.append("AI returned empty response.")
+            if response is None or not response.candidates:
+                logs.append("AI returned empty response or reached max retries.")
                 break
 
             model_content = response.candidates[0].content
@@ -342,6 +359,8 @@ class AIDeployAgent:
             contents.append(
                 types.Content(role="user", parts=response_parts)
             )
+            # Pacing delay to avoid exceeding free-tier requests-per-minute
+            await asyncio.sleep(2.5)
 
         if command_count >= self.max_commands:
             logs.append(f"⚠️ Reached max command limit ({self.max_commands}).")
@@ -390,3 +409,321 @@ class AIDeployAgent:
                 await on_log(message)
             except Exception:
                 pass
+
+
+_GROQ_SYSTEM_PROMPT = """\
+You are a senior DevOps deployment agent. Deploy the requested repository to the configured Linux server.
+
+Rules:
+- Use run_ssh_command for server work, one command at a time.
+- Inspect the project before choosing the stack.
+- Prefer existing server conventions and avoid breaking other apps.
+- Use /var/www/<project_name> unless the project clearly needs another path.
+- For static/SPAs, build and serve with nginx under the public base URL.
+- For backend apps, create isolated env/service/database when needed.
+- Verify with curl before calling deployment_complete.
+- Keep commands efficient and do not dump large files or huge logs.
+- If a command produces long output, ask only for the relevant tail or grep result next.
+"""
+
+
+_GROQ_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "run_ssh_command",
+            "description": (
+                "Execute a shell command on the remote server via SSH. "
+                "You have full sudo access. Returns stdout, stderr, and exit code. "
+                "Run one command at a time."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to execute. Use sudo when needed.",
+                    },
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "deployment_complete",
+            "description": (
+                "Signal that deployment is completely finished and the site is live. "
+                "Only call this after verifying the URL works with curl."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "live_url": {
+                        "type": "string",
+                        "description": "The public URL where the deployed project is now accessible.",
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "Detailed summary of everything that was done during deployment.",
+                    },
+                },
+                "required": ["summary"],
+            },
+        },
+    },
+]
+
+
+class GroqDeployAgent:
+    """Groq-powered deployment agent using OpenAI-compatible tool calls."""
+
+    endpoint = "https://api.groq.com/openai/v1/chat/completions"
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "openai/gpt-oss-120b",
+        max_commands: int = 50,
+        command_timeout: int = 120,
+    ) -> None:
+        if not api_key:
+            raise ValueError("GROQ_API_KEY is required when AI_PROVIDER=groq.")
+
+        self.api_key = api_key
+        self.model = model
+        self.max_commands = max_commands
+        self.command_timeout = command_timeout
+
+    async def deploy(
+        self,
+        plan: DeploymentPlan,
+        credentials: dict[str, dict],
+        on_log: LogCallback = None,
+    ) -> tuple[str | None, list[str]]:
+        server = credentials.get("server", {})
+        if not server:
+            raise ValueError(
+                "Server credentials are required for AI deployment. "
+                "Use /set_server to configure them first."
+            )
+
+        ssh = SSHClient(command_timeout=self.command_timeout)
+        try:
+            await AIDeployAgent._log(on_log, "🔌 Connecting to server...")
+            await ssh.connect(
+                host=server["host"],
+                username=server["user"],
+                key_path=server["ssh_key_path"],
+            )
+            await AIDeployAgent._log(on_log, "✅ Connected! AI is now deploying your project...")
+            return await self._agent_loop(ssh, plan, server, on_log)
+        finally:
+            await ssh.close()
+
+    async def _agent_loop(
+        self,
+        ssh: SSHClient,
+        plan: DeploymentPlan,
+        server: dict,
+        on_log: LogCallback,
+    ) -> tuple[str | None, list[str]]:
+        logs: list[str] = []
+        command_count = 0
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": _GROQ_SYSTEM_PROMPT},
+            {"role": "user", "content": AIDeployAgent._build_context(plan, server)},
+        ]
+
+        timeout = httpx.Timeout(max(60, self.command_timeout + 30))
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            while command_count < self.max_commands:
+                message = await self._complete(client, messages, on_log)
+                content = message.get("content") or ""
+                if content:
+                    logs.append(content)
+
+                tool_calls = message.get("tool_calls") or []
+                assistant_message: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": content,
+                }
+                if tool_calls:
+                    assistant_message["tool_calls"] = tool_calls
+                messages.append(assistant_message)
+
+                if not tool_calls:
+                    logs.append("AI finished without calling deployment_complete.")
+                    break
+
+                for tool_call in tool_calls:
+                    function = tool_call.get("function") or {}
+                    name = function.get("name", "")
+                    args = self._decode_arguments(function.get("arguments"))
+
+                    if name == "deployment_complete":
+                        live_url = args.get("live_url") or None
+                        summary = args.get("summary", "Deployment complete.")
+                        logs.append(f"✅ {summary}")
+                        await AIDeployAgent._log(on_log, f"✅ Deployment complete!\n\n{summary}")
+                        return live_url, logs
+
+                    if name == "run_ssh_command":
+                        command_count += 1
+                        command = str(args.get("command", ""))
+                        short_cmd = command[:80] + ("..." if len(command) > 80 else "")
+                        await AIDeployAgent._log(
+                            on_log,
+                            f"⚙️ [{command_count}/{self.max_commands}] `{short_cmd}`",
+                        )
+                        logs.append(f"$ {command}")
+
+                        try:
+                            stdout, stderr, exit_code = await ssh.run(command)
+                        except CommandBlockedError as exc:
+                            stdout, stderr, exit_code = "", str(exc), 1
+                            logs.append(f"🚫 BLOCKED: {exc}")
+                            await AIDeployAgent._log(on_log, f"🚫 Blocked: {command[:60]}")
+
+                        logs.append(AIDeployAgent._summarise_output(stdout, stderr, exit_code))
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.get("id"),
+                                "content": json.dumps(
+                                    {
+                                        "stdout": stdout[-1200:],
+                                        "stderr": stderr[-600:],
+                                        "exit_code": exit_code,
+                                    }
+                                ),
+                            }
+                        )
+                        continue
+
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.get("id"),
+                            "content": json.dumps({"error": f"Unknown function: {name}"}),
+                        }
+                    )
+
+                await asyncio.sleep(0.8)
+
+        if command_count >= self.max_commands:
+            logs.append(f"⚠️ Reached max command limit ({self.max_commands}).")
+            await AIDeployAgent._log(on_log, f"⚠️ Reached command limit ({self.max_commands}).")
+
+        return None, logs
+
+    async def _complete(
+        self,
+        client: httpx.AsyncClient,
+        messages: list[dict[str, Any]],
+        on_log: LogCallback,
+    ) -> dict[str, Any]:
+        payload = {
+            "model": self.model,
+            "messages": self._compact_messages(messages),
+            "tools": _GROQ_TOOLS,
+            "tool_choice": "auto",
+            "temperature": 0.1,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        last_error: Exception | None = None
+        for attempt in range(5):
+            try:
+                response = await client.post(self.endpoint, headers=headers, json=payload)
+                if response.status_code in {429, 500, 502, 503, 504}:
+                    wait_seconds = self._retry_wait(response, attempt)
+                    await AIDeployAgent._log(
+                        on_log,
+                        f"⏳ AI provider is busy. Retrying in {wait_seconds}s...",
+                    )
+                    await asyncio.sleep(wait_seconds)
+                    continue
+
+                response.raise_for_status()
+                data = response.json()
+                return data["choices"][0]["message"]
+            except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
+                last_error = exc
+                wait_seconds = min(2**attempt, 8)
+                logger.warning("groq_deploy.retry", attempt=attempt, error=str(exc))
+                await asyncio.sleep(wait_seconds)
+
+        raise RuntimeError(f"Groq deployment request failed after retries: {last_error}")
+
+
+    @classmethod
+    def _compact_messages(cls, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        fixed = messages[:2]
+        tail = messages[2:]
+        if len(tail) > 12:
+            tail = tail[-12:]
+
+        while tail and tail[0].get("role") == "tool":
+            tail = tail[1:]
+
+        return [cls._trim_message(message) for message in [*fixed, *tail]]
+
+    @classmethod
+    def _trim_message(cls, message: dict[str, Any]) -> dict[str, Any]:
+        trimmed = dict(message)
+        content = trimmed.get("content")
+        role = trimmed.get("role")
+
+        if isinstance(content, str):
+            if role == "tool":
+                trimmed["content"] = cls._trim_tool_content(content)
+            else:
+                trimmed["content"] = cls._trim_text(content, 1800)
+
+        return trimmed
+
+    @classmethod
+    def _trim_tool_content(cls, content: str) -> str:
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            return cls._trim_text(content, 1200)
+
+        if isinstance(payload, dict):
+            if isinstance(payload.get("stdout"), str):
+                payload["stdout"] = cls._trim_text(payload["stdout"], 900)
+            if isinstance(payload.get("stderr"), str):
+                payload["stderr"] = cls._trim_text(payload["stderr"], 450)
+            return json.dumps(payload)
+
+        return cls._trim_text(content, 1200)
+
+    @staticmethod
+    def _trim_text(value: str, limit: int) -> str:
+        if len(value) <= limit:
+            return value
+        return f"...[trimmed {len(value) - limit} chars]\n{value[-limit:]}"
+
+    @staticmethod
+    def _decode_arguments(raw: Any) -> dict[str, Any]:
+        if isinstance(raw, dict):
+            return raw
+        if not raw:
+            return {}
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+
+    @staticmethod
+    def _retry_wait(response: httpx.Response, attempt: int) -> int:
+        retry_after = response.headers.get("retry-after")
+        if retry_after and retry_after.isdigit():
+            return min(int(retry_after), 30)
+        return min(4 + (attempt * 3), 20)

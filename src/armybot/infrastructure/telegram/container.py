@@ -29,7 +29,16 @@ from armybot.shared.settings import settings
 def _build_executor():
     """Return the appropriate executor based on execution_mode."""
     if settings.execution_mode == "ai":
-        from armybot.infrastructure.deploy.ai_agent import AIDeployAgent
+        from armybot.infrastructure.deploy.ai_agent import AIDeployAgent, GroqDeployAgent
+
+        provider = settings.ai_provider.strip().lower()
+        if provider == "groq":
+            return GroqDeployAgent(
+                api_key=settings.groq_api_key,
+                model=settings.groq_model,
+                max_commands=settings.ai_max_commands,
+                command_timeout=settings.ai_command_timeout,
+            )
 
         return AIDeployAgent(
             api_key=settings.gemini_api_key,
