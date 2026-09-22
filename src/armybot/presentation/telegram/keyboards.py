@@ -42,6 +42,7 @@ def start_reply_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
         [KeyboardButton(text="Start"), KeyboardButton(text="Menu")],
         [KeyboardButton(text="Setup credentials"), KeyboardButton(text="Deploy project")],
         [KeyboardButton(text="Projects"), KeyboardButton(text="Status")],
+        [KeyboardButton(text="Share phone", request_contact=True)],
     ]
     if is_admin:
         rows.append([KeyboardButton(text="Admin panel")])
@@ -52,6 +53,7 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Add user", callback_data="admin:add_user")],
+            [InlineKeyboardButton(text="All users", callback_data="admin:users")],
             [InlineKeyboardButton(text="Pending users", callback_data="admin:pending")],
             [InlineKeyboardButton(text="Back to menu", callback_data="menu:home")],
         ]

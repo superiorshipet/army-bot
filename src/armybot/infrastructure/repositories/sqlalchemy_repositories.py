@@ -3,10 +3,11 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from armybot.domain.entities import Deployment, Project, User, UserCredential, UsernameInvite
+from armybot.domain.entities import Deployment, PhoneInvite, Project, User, UserCredential, UsernameInvite
 from armybot.domain.enums import CredentialProvider, UserStatus
 from armybot.infrastructure.database.models import (
     DeploymentModel,
+    PhoneInviteModel,
     ProjectModel,
     UserCredentialModel,
     UserModel,
@@ -17,6 +18,7 @@ from armybot.infrastructure.repositories.mappers import (
     to_deployment,
     to_project,
     to_user,
+    to_phone_invite,
     to_username_invite,
 )
 
@@ -33,6 +35,10 @@ class SqlUserRepository:
         model = await self.session.scalar(select(UserModel).where(UserModel.username.ilike(username)))
         return to_user(model) if model else None
 
+    async def get_by_phone_number(self, phone_number: str) -> User | None:
+        model = await self.session.scalar(select(UserModel).where(UserModel.phone_number == phone_number))
+        return to_user(model) if model else None
+
     async def add(self, user: User) -> None:
         self.session.add(
             UserModel(
@@ -40,6 +46,7 @@ class SqlUserRepository:
                 telegram_id=user.telegram_id,
                 full_name=user.full_name,
                 username=user.username,
+                phone_number=user.phone_number,
                 role=user.role,
                 status=user.status,
                 created_at=user.created_at,
@@ -52,11 +59,16 @@ class SqlUserRepository:
             raise LookupError("User not found.")
         model.full_name = user.full_name
         model.username = user.username
+        model.phone_number = user.phone_number
         model.role = user.role
         model.status = user.status
 
     async def list_by_status(self, status: UserStatus) -> list[User]:
         rows = await self.session.scalars(select(UserModel).where(UserModel.status == status))
+        return [to_user(row) for row in rows]
+
+    async def list_all(self) -> list[User]:
+        rows = await self.session.scalars(select(UserModel).order_by(UserModel.created_at.desc()))
         return [to_user(row) for row in rows]
 
     async def add_username_invite(self, invite: UsernameInvite) -> None:
@@ -77,6 +89,25 @@ class SqlUserRepository:
             return None
         model = await self.session.get(UsernameInviteModel, username)
         return to_username_invite(model) if model else None
+
+    async def add_phone_invite(self, invite: PhoneInvite) -> None:
+        model = await self.session.get(PhoneInviteModel, invite.phone_number)
+        if model:
+            model.full_name = invite.full_name
+            return
+        self.session.add(
+            PhoneInviteModel(
+                phone_number=invite.phone_number,
+                full_name=invite.full_name,
+                created_at=invite.created_at,
+            )
+        )
+
+    async def get_phone_invite(self, phone_number: str) -> PhoneInvite | None:
+        if not phone_number:
+            return None
+        model = await self.session.get(PhoneInviteModel, phone_number)
+        return to_phone_invite(model) if model else None
 
 
 class SqlCredentialRepository:

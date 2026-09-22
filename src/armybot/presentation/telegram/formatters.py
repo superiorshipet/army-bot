@@ -3,7 +3,8 @@ from armybot.domain.entities import Deployment, User
 
 def user_line(user: User) -> str:
     username = f"@{user.username}" if user.username else "no username"
-    return f"{user.full_name} ({username}) - `{user.telegram_id}` - {user.status.value}"
+    phone = f" - {user.phone_number}" if user.phone_number else ""
+    return f"{user.full_name} ({username}) - `{user.telegram_id}`{phone} - {user.status.value}"
 
 
 def deployment_report(deployment: Deployment) -> str:

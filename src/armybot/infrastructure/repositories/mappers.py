@@ -1,6 +1,7 @@
-from armybot.domain.entities import Deployment, Project, User, UserCredential, UsernameInvite
+from armybot.domain.entities import Deployment, PhoneInvite, Project, User, UserCredential, UsernameInvite
 from armybot.infrastructure.database.models import (
     DeploymentModel,
+    PhoneInviteModel,
     ProjectModel,
     UserCredentialModel,
     UserModel,
@@ -14,6 +15,7 @@ def to_user(model: UserModel) -> User:
         telegram_id=model.telegram_id,
         full_name=model.full_name,
         username=model.username,
+        phone_number=model.phone_number,
         role=model.role,
         status=model.status,
         created_at=model.created_at,
@@ -34,6 +36,14 @@ def to_credential(model: UserCredentialModel) -> UserCredential:
 def to_username_invite(model: UsernameInviteModel) -> UsernameInvite:
     return UsernameInvite(
         username=model.username,
+        full_name=model.full_name,
+        created_at=model.created_at,
+    )
+
+
+def to_phone_invite(model: PhoneInviteModel) -> PhoneInvite:
+    return PhoneInvite(
+        phone_number=model.phone_number,
         full_name=model.full_name,
         created_at=model.created_at,
     )

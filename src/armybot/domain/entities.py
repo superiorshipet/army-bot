@@ -22,6 +22,7 @@ class User:
     telegram_id: int
     full_name: str
     username: str | None
+    phone_number: str | None
     role: UserRole
     status: UserStatus
     created_at: datetime = field(default_factory=utcnow)
@@ -48,6 +49,13 @@ class UserCredential:
 @dataclass(slots=True)
 class UsernameInvite:
     username: str
+    full_name: str | None = None
+    created_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass(slots=True)
+class PhoneInvite:
+    phone_number: str
     full_name: str | None = None
     created_at: datetime = field(default_factory=utcnow)
 

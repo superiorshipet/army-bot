@@ -1,7 +1,7 @@
 from uuid import uuid4
 
 from armybot.application.ports.repositories import UserRepository
-from armybot.domain.entities import User, UsernameInvite
+from armybot.domain.entities import PhoneInvite, User, UsernameInvite
 from armybot.domain.enums import UserRole, UserStatus
 
 
@@ -31,6 +31,7 @@ class AccessService:
             telegram_id=telegram_id,
             full_name=invite.full_name or full_name if invite else full_name,
             username=username,
+            phone_number=None,
             role=UserRole.SuperAdmin if is_super_admin else UserRole.User,
             status=UserStatus.Active if is_super_admin or is_invited else UserStatus.Pending,
         )
@@ -48,11 +49,13 @@ class AccessService:
         telegram_id: int,
         full_name: str,
         username: str | None = None,
+        phone_number: str | None = None,
     ) -> User:
         existing = await self.users.get_by_telegram_id(telegram_id)
         if existing:
             existing.full_name = full_name or existing.full_name
             existing.username = username or existing.username
+            existing.phone_number = _normalize_phone(phone_number) or existing.phone_number
             existing.role = UserRole.SuperAdmin if telegram_id in self.super_admin_ids else UserRole.User
             existing.status = UserStatus.Active
             await self.users.update(existing)
@@ -63,6 +66,7 @@ class AccessService:
             telegram_id=telegram_id,
             full_name=full_name or str(telegram_id),
             username=username,
+            phone_number=_normalize_phone(phone_number),
             role=UserRole.SuperAdmin if telegram_id in self.super_admin_ids else UserRole.User,
             status=UserStatus.Active,
         )
@@ -85,6 +89,55 @@ class AccessService:
         await self.users.add_username_invite(invite)
         return invite
 
+    async def add_allowed_phone(self, phone_number: str, full_name: str | None = None) -> User | PhoneInvite:
+        normalized = _normalize_phone(phone_number)
+        if not normalized:
+            raise ValueError("Phone number is required.")
+
+        existing = await self.users.get_by_phone_number(normalized)
+        if existing:
+            existing.full_name = full_name or existing.full_name
+            existing.status = UserStatus.Active
+            await self.users.update(existing)
+            return existing
+
+        invite = PhoneInvite(phone_number=normalized, full_name=full_name)
+        await self.users.add_phone_invite(invite)
+        return invite
+
+    async def activate_by_phone(
+        self,
+        telegram_id: int,
+        full_name: str,
+        username: str | None,
+        phone_number: str,
+    ) -> User | None:
+        normalized = _normalize_phone(phone_number)
+        invite = await self.users.get_phone_invite(normalized)
+        if not invite:
+            return None
+
+        existing = await self.users.get_by_telegram_id(telegram_id)
+        if existing:
+            existing.full_name = invite.full_name or full_name or existing.full_name
+            existing.username = username or existing.username
+            existing.phone_number = normalized
+            existing.status = UserStatus.Active
+            await self.users.update(existing)
+            return existing
+
+        user = User(
+            id=uuid4(),
+            telegram_id=telegram_id,
+            full_name=invite.full_name or full_name or str(telegram_id),
+            username=username,
+            phone_number=normalized,
+            role=UserRole.SuperAdmin if telegram_id in self.super_admin_ids else UserRole.User,
+            status=UserStatus.Active,
+        )
+        await self.users.add(user)
+        return user
+
     async def reject(self, telegram_id: int) -> User:
         user = await self._require_user(telegram_id)
         user.status = UserStatus.Rejected
@@ -99,6 +152,9 @@ class AccessService:
 
     async def pending_users(self) -> list[User]:
         return await self.users.list_by_status(UserStatus.Pending)
+
+    async def all_users(self) -> list[User]:
+        return await self.users.list_all()
 
     async def require_active(self, telegram_id: int) -> User:
         user = await self._require_user(telegram_id)
@@ -121,3 +177,7 @@ class AccessService:
 
 def _normalize_username(username: str | None) -> str:
     return (username or "").strip().removeprefix("@").lower()
+
+
+def _normalize_phone(phone_number: str | None) -> str:
+    return "".join(ch for ch in (phone_number or "") if ch.isdigit() or ch == "+")

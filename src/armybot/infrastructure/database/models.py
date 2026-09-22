@@ -16,6 +16,7 @@ class UserModel(Base):
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     full_name: Mapped[str] = mapped_column(String(255))
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    phone_number: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     role: Mapped[UserRole] = mapped_column(Enum(UserRole, native_enum=False), index=True)
     status: Mapped[UserStatus] = mapped_column(Enum(UserStatus, native_enum=False), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -25,6 +26,14 @@ class UsernameInviteModel(Base):
     __tablename__ = "username_invites"
 
     username: Mapped[str] = mapped_column(String(255), primary_key=True)
+    full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PhoneInviteModel(Base):
+    __tablename__ = "phone_invites"
+
+    phone_number: Mapped[str] = mapped_column(String(64), primary_key=True)
     full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

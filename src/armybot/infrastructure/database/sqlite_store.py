@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from uuid import UUID
 
-from armybot.domain.entities import Deployment, Project, User, UserCredential, UsernameInvite
+from armybot.domain.entities import Deployment, PhoneInvite, Project, User, UserCredential, UsernameInvite
 from armybot.domain.enums import (
     CredentialProvider,
     DeploymentStatus,
@@ -44,6 +44,7 @@ class SqliteStore:
                     telegram_id INTEGER NOT NULL UNIQUE,
                     full_name TEXT NOT NULL,
                     username TEXT,
+                    phone_number TEXT,
                     role TEXT NOT NULL,
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL
@@ -61,6 +62,12 @@ class SqliteStore:
 
                 CREATE TABLE IF NOT EXISTS username_invites (
                     username TEXT PRIMARY KEY,
+                    full_name TEXT,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS phone_invites (
+                    phone_number TEXT PRIMARY KEY,
                     full_name TEXT,
                     created_at TEXT NOT NULL
                 );
@@ -92,6 +99,9 @@ class SqliteStore:
                 );
                 """
             )
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+            if "phone_number" not in columns:
+                conn.execute("ALTER TABLE users ADD COLUMN phone_number TEXT")
 
 
 class SqliteUserRepository:
@@ -113,18 +123,24 @@ class SqliteUserRepository:
             row = conn.execute("SELECT * FROM users WHERE lower(username) = ?", (username.lower(),)).fetchone()
         return _row_to_user(row) if row else None
 
+    async def get_by_phone_number(self, phone_number: str) -> User | None:
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT * FROM users WHERE phone_number = ?", (phone_number,)).fetchone()
+        return _row_to_user(row) if row else None
+
     async def add(self, user: User) -> None:
         with self.store._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO users (id, telegram_id, full_name, username, role, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO users (id, telegram_id, full_name, username, phone_number, role, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(user.id),
                     user.telegram_id,
                     user.full_name,
                     user.username,
+                    user.phone_number,
                     user.role.value,
                     user.status.value,
                     user.created_at.isoformat(),
@@ -134,13 +150,18 @@ class SqliteUserRepository:
     async def update(self, user: User) -> None:
         with self.store._connect() as conn:
             conn.execute(
-                "UPDATE users SET full_name=?, username=?, role=?, status=? WHERE id=?",
-                (user.full_name, user.username, user.role.value, user.status.value, str(user.id)),
+                "UPDATE users SET full_name=?, username=?, phone_number=?, role=?, status=? WHERE id=?",
+                (user.full_name, user.username, user.phone_number, user.role.value, user.status.value, str(user.id)),
             )
 
     async def list_by_status(self, status: UserStatus) -> list[User]:
         with self.store._connect() as conn:
             rows = conn.execute("SELECT * FROM users WHERE status = ?", (status.value,)).fetchall()
+        return [_row_to_user(row) for row in rows]
+
+    async def list_all(self) -> list[User]:
+        with self.store._connect() as conn:
+            rows = conn.execute("SELECT * FROM users ORDER BY created_at DESC").fetchall()
         return [_row_to_user(row) for row in rows]
 
     async def add_username_invite(self, invite: UsernameInvite) -> None:
@@ -161,6 +182,25 @@ class SqliteUserRepository:
         with self.store._connect() as conn:
             row = conn.execute("SELECT * FROM username_invites WHERE username = ?", (username,)).fetchone()
         return _row_to_username_invite(row) if row else None
+
+    async def add_phone_invite(self, invite: PhoneInvite) -> None:
+        with self.store._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO phone_invites (phone_number, full_name, created_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(phone_number) DO UPDATE SET
+                    full_name=excluded.full_name
+                """,
+                (invite.phone_number, invite.full_name, invite.created_at.isoformat()),
+            )
+
+    async def get_phone_invite(self, phone_number: str) -> PhoneInvite | None:
+        if not phone_number:
+            return None
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT * FROM phone_invites WHERE phone_number = ?", (phone_number,)).fetchone()
+        return _row_to_phone_invite(row) if row else None
 
 
 class SqliteCredentialRepository:
@@ -302,6 +342,7 @@ def _row_to_user(row: sqlite3.Row) -> User:
         telegram_id=row["telegram_id"],
         full_name=row["full_name"],
         username=row["username"],
+        phone_number=row["phone_number"] if "phone_number" in row.keys() else None,
         role=UserRole(row["role"]),
         status=UserStatus(row["status"]),
         created_at=datetime.fromisoformat(row["created_at"]),
@@ -324,6 +365,14 @@ def _row_to_credential(row: sqlite3.Row) -> UserCredential:
 def _row_to_username_invite(row: sqlite3.Row) -> UsernameInvite:
     return UsernameInvite(
         username=row["username"],
+        full_name=row["full_name"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+    )
+
+
+def _row_to_phone_invite(row: sqlite3.Row) -> PhoneInvite:
+    return PhoneInvite(
+        phone_number=row["phone_number"],
         full_name=row["full_name"],
         created_at=datetime.fromisoformat(row["created_at"]),
     )

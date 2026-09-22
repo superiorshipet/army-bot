@@ -137,6 +137,33 @@ async def reply_admin(message: Message) -> None:
     await message.answer(text, reply_markup=admin_panel_keyboard(), parse_mode="Markdown")
 
 
+@router.message(F.contact)
+async def receive_contact(message: Message) -> None:
+    if not message.from_user or not message.contact:
+        return
+    if message.contact.user_id and message.contact.user_id != message.from_user.id:
+        await message.answer("Please share your own phone using the Share phone button.")
+        return
+
+    async with container_scope() as c:
+        user = await c.access.activate_by_phone(
+            telegram_id=message.from_user.id,
+            full_name=_sender_name(message),
+            username=message.from_user.username,
+            phone_number=message.contact.phone_number,
+        )
+
+    if user:
+        await message.answer(
+            "Phone matched. Your account is active now.",
+            reply_markup=start_reply_keyboard(user.is_super_admin),
+        )
+        await message.answer("Choose what you want to do:", reply_markup=main_menu_keyboard(user.is_super_admin))
+        return
+
+    await message.answer("This phone number is not approved yet. Ask the admin to add it first.")
+
+
 @router.callback_query(F.data == "menu:home")
 async def menu_home(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
@@ -226,6 +253,15 @@ async def admin_pending(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+@router.callback_query(F.data == "admin:users")
+async def admin_users(callback: CallbackQuery) -> None:
+    if not callback.from_user:
+        return
+    text = await _all_users_text(callback.from_user.id)
+    await callback.message.edit_text(text, reply_markup=admin_panel_keyboard(), parse_mode="Markdown")
+    await callback.answer()
+
+
 @router.callback_query(F.data == "admin:add_user")
 async def admin_add_user(callback: CallbackQuery, state: FSMContext) -> None:
     if not callback.from_user:
@@ -235,9 +271,12 @@ async def admin_add_user(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SetupFlow.waiting_user_to_add)
     await callback.message.edit_text(
         "Add user\n\n"
-        "Send the user's numeric Telegram ID.\n"
-        "You can also forward a message from that user if Telegram exposes their ID.\n\n"
+        "Send @username, phone number, or numeric Telegram ID.\n"
+        "You can also forward a message from that user if Telegram exposes their ID.\n"
+        "Phone users must press Share phone once when they open the bot.\n\n"
         "Example:\n"
+        "@username Mohamed\n"
+        "+201234567890 Mohamed\n"
         "123456789 Mohamed",
         reply_markup=deploy_prompt_keyboard(),
     )
@@ -334,6 +373,8 @@ async def receive_user_to_add(message: Message, state: FSMContext) -> None:
         await c.access.require_super_admin(message.from_user.id)
         if isinstance(target[0], int):
             user_or_invite = await c.access.add_active_user(target[0], target[1], target[2])
+        elif _looks_like_phone(target[0]):
+            user_or_invite = await c.access.add_allowed_phone(target[0], target[1])
         else:
             user_or_invite = await c.access.add_allowed_username(target[0], target[1])
 
@@ -483,6 +524,13 @@ async def pending(message: Message) -> None:
     await message.answer("\n".join(user_line(user) for user in users), parse_mode="Markdown")
 
 
+@router.message(Command("users"))
+async def users(message: Message) -> None:
+    if not message.from_user:
+        return
+    await message.answer(await _all_users_text(message.from_user.id), parse_mode="Markdown")
+
+
 @router.message(Command("add_user"))
 async def add_user(message: Message) -> None:
     if not message.from_user:
@@ -496,6 +544,8 @@ async def add_user(message: Message) -> None:
         await c.access.require_super_admin(message.from_user.id)
         if isinstance(target[0], int):
             user_or_invite = await c.access.add_active_user(target[0], target[1], target[2])
+        elif _looks_like_phone(target[0]):
+            user_or_invite = await c.access.add_allowed_phone(target[0], target[1])
         else:
             user_or_invite = await c.access.add_allowed_username(target[0], target[1])
     await message.answer(
@@ -566,6 +616,15 @@ async def _is_admin(telegram_id: int) -> bool:
     async with container_scope() as c:
         user = await c.access.require_active(telegram_id)
     return user.is_super_admin
+
+
+async def _all_users_text(telegram_id: int) -> str:
+    async with container_scope() as c:
+        await c.access.require_super_admin(telegram_id)
+        users = await c.access.all_users()
+    if not users:
+        return "No users yet."
+    return "All users:\n" + "\n".join(user_line(user) for user in users)
 
 
 def _command_args(message: Message) -> str:
@@ -667,6 +726,10 @@ def _parse_user_to_add(message: Message, command_mode: bool = False) -> tuple[in
         username = parts[0].removeprefix("@").strip().lower()
         full_name = parts[1].strip() if len(parts) > 1 else None
         return username, full_name
+    if _looks_like_phone(parts[0]):
+        phone_number = parts[0].strip()
+        full_name = parts[1].strip() if len(parts) > 1 else None
+        return phone_number, full_name
     if not parts[0].isdigit():
         username = parts[0].strip().lower()
         full_name = parts[1].strip() if len(parts) > 1 else None
@@ -680,10 +743,21 @@ def _parse_user_to_add(message: Message, command_mode: bool = False) -> tuple[in
 def _added_user_text(user_or_invite) -> str:
     if hasattr(user_or_invite, "telegram_id"):
         return f"User added and activated:\n{user_line(user_or_invite)}"
+    if hasattr(user_or_invite, "phone_number"):
+        return (
+            "Phone approved.\n"
+            f"{user_or_invite.phone_number} will be activated when the user presses Share phone."
+        )
     return (
         "Username approved.\n"
         f"@{user_or_invite.username} will be activated automatically when they press Start."
     )
+
+
+def _looks_like_phone(value: str) -> bool:
+    cleaned = value.strip()
+    digits = "".join(ch for ch in cleaned if ch.isdigit())
+    return cleaned.startswith("+") or (cleaned.startswith("0") and cleaned.isdigit() and len(digits) >= 8)
 
 
 def _forwarded_user(message: Message):

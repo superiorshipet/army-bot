@@ -1,7 +1,7 @@
 from typing import Protocol
 from uuid import UUID
 
-from armybot.domain.entities import Deployment, Project, User, UserCredential, UsernameInvite
+from armybot.domain.entities import Deployment, PhoneInvite, Project, User, UserCredential, UsernameInvite
 from armybot.domain.enums import CredentialProvider, UserStatus
 
 
@@ -14,11 +14,19 @@ class UserRepository(Protocol):
 
     async def list_by_status(self, status: UserStatus) -> list[User]: ...
 
+    async def list_all(self) -> list[User]: ...
+
     async def get_by_username(self, username: str) -> User | None: ...
+
+    async def get_by_phone_number(self, phone_number: str) -> User | None: ...
 
     async def add_username_invite(self, invite: UsernameInvite) -> None: ...
 
     async def get_username_invite(self, username: str) -> UsernameInvite | None: ...
+
+    async def add_phone_invite(self, invite: PhoneInvite) -> None: ...
+
+    async def get_phone_invite(self, phone_number: str) -> PhoneInvite | None: ...
 
 
 class CredentialRepository(Protocol):
