@@ -9,10 +9,12 @@ from armybot.infrastructure.telegram.container import container_scope
 from armybot.presentation.telegram.formatters import deployment_report, user_line
 from armybot.presentation.telegram.keyboards import (
     access_decision_keyboard,
+    admin_panel_keyboard,
     deploy_prompt_keyboard,
     main_menu_keyboard,
     provider_label,
     setup_keyboard,
+    start_reply_keyboard,
 )
 from armybot.shared.settings import settings
 
@@ -22,6 +24,7 @@ router = Router()
 class SetupFlow(StatesGroup):
     waiting_credential = State()
     waiting_deploy_repo = State()
+    waiting_user_to_add = State()
 
 
 def _sender_name(message: Message) -> str:
@@ -44,6 +47,10 @@ async def start(message: Message) -> None:
 
     if user.is_active:
         await message.answer(
+            "Quick buttons are ready.",
+            reply_markup=start_reply_keyboard(user.is_super_admin),
+        )
+        await message.answer(
             "Welcome to Army Deploy.\nChoose what you want to do:",
             reply_markup=main_menu_keyboard(user.is_super_admin),
         )
@@ -61,6 +68,11 @@ async def start(message: Message) -> None:
             )
 
 
+@router.message(F.text.in_({"Start", "Menu"}))
+async def reply_start(message: Message) -> None:
+    await start(message)
+
+
 @router.message(Command("setup"))
 async def setup(message: Message) -> None:
     if not message.from_user:
@@ -69,6 +81,60 @@ async def setup(message: Message) -> None:
         user = await c.access.require_active(message.from_user.id)
         saved = {credential.provider for credential in await c.credentials_repo.list_for_user(user.id)}
     await message.answer(_setup_text(saved), reply_markup=setup_keyboard(saved))
+
+
+@router.message(F.text == "Setup credentials")
+async def reply_setup(message: Message) -> None:
+    await setup(message)
+
+
+@router.message(F.text == "Deploy project")
+async def reply_deploy(message: Message, state: FSMContext) -> None:
+    if not message.from_user:
+        return
+    async with container_scope() as c:
+        user = await c.access.require_active(message.from_user.id)
+    await state.set_state(SetupFlow.waiting_deploy_repo)
+    await message.answer(
+        "Send the repository URL or local path.\n"
+        "Optional branch format:\n"
+        "repo_url branch\n\n"
+        "Example:\n"
+        "https://github.com/user/project main",
+        reply_markup=start_reply_keyboard(user.is_super_admin),
+    )
+
+
+@router.message(F.text == "Projects")
+async def reply_projects(message: Message) -> None:
+    if not message.from_user:
+        return
+    await message.answer(
+        await _projects_text(message.from_user.id),
+        reply_markup=start_reply_keyboard(await _is_admin(message.from_user.id)),
+    )
+
+
+@router.message(F.text == "Status")
+async def reply_status(message: Message) -> None:
+    if not message.from_user:
+        return
+    await message.answer(
+        await _status_text(message.from_user.id),
+        reply_markup=start_reply_keyboard(await _is_admin(message.from_user.id)),
+        parse_mode="Markdown",
+    )
+
+
+@router.message(F.text == "Admin panel")
+async def reply_admin(message: Message) -> None:
+    if not message.from_user:
+        return
+    async with container_scope() as c:
+        await c.access.require_super_admin(message.from_user.id)
+        users = await c.access.pending_users()
+    text = "Admin panel\nNo pending users." if not users else "Pending users:\n" + "\n".join(user_line(user) for user in users)
+    await message.answer(text, reply_markup=admin_panel_keyboard(), parse_mode="Markdown")
 
 
 @router.callback_query(F.data == "menu:home")
@@ -144,7 +210,37 @@ async def menu_admin(callback: CallbackQuery) -> None:
         text = "Admin panel\nNo pending users."
     else:
         text = "Pending users:\n" + "\n".join(user_line(user) for user in users)
-    await callback.message.edit_text(text, reply_markup=main_menu_keyboard(True), parse_mode="Markdown")
+    await callback.message.edit_text(text, reply_markup=admin_panel_keyboard(), parse_mode="Markdown")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:pending")
+async def admin_pending(callback: CallbackQuery) -> None:
+    if not callback.from_user:
+        return
+    async with container_scope() as c:
+        await c.access.require_super_admin(callback.from_user.id)
+        users = await c.access.pending_users()
+    text = "No pending users." if not users else "Pending users:\n" + "\n".join(user_line(user) for user in users)
+    await callback.message.edit_text(text, reply_markup=admin_panel_keyboard(), parse_mode="Markdown")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:add_user")
+async def admin_add_user(callback: CallbackQuery, state: FSMContext) -> None:
+    if not callback.from_user:
+        return
+    async with container_scope() as c:
+        await c.access.require_super_admin(callback.from_user.id)
+    await state.set_state(SetupFlow.waiting_user_to_add)
+    await callback.message.edit_text(
+        "Add user\n\n"
+        "Send the user's numeric Telegram ID.\n"
+        "You can also forward a message from that user if Telegram exposes their ID.\n\n"
+        "Example:\n"
+        "123456789 Mohamed",
+        reply_markup=deploy_prompt_keyboard(),
+    )
     await callback.answer()
 
 
@@ -222,6 +318,39 @@ async def receive_deploy_repo(message: Message, state: FSMContext) -> None:
         deployment = await c.deploy.deploy(user, repo_url, branch)
     await notice.edit_text(deployment_report(deployment), parse_mode="Markdown")
     await message.answer("What do you want to do next?", reply_markup=main_menu_keyboard(user.is_super_admin))
+
+
+@router.message(SetupFlow.waiting_user_to_add)
+async def receive_user_to_add(message: Message, state: FSMContext) -> None:
+    if not message.from_user:
+        return
+    try:
+        target = _parse_user_to_add(message)
+    except ValueError as exc:
+        await message.answer(str(exc), reply_markup=deploy_prompt_keyboard())
+        return
+
+    async with container_scope() as c:
+        await c.access.require_super_admin(message.from_user.id)
+        if isinstance(target[0], int):
+            user_or_invite = await c.access.add_active_user(target[0], target[1], target[2])
+        else:
+            user_or_invite = await c.access.add_allowed_username(target[0], target[1])
+
+    await state.clear()
+    await message.answer(
+        _added_user_text(user_or_invite),
+        reply_markup=admin_panel_keyboard(),
+        parse_mode="Markdown",
+    )
+    if hasattr(user_or_invite, "telegram_id"):
+        try:
+            await message.bot.send_message(
+                user_or_invite.telegram_id,
+                "تم تفعيل حسابك على Army Deploy. ابعت /start عشان تبدأ.",
+            )
+        except Exception:
+            pass
 
 
 @router.message(Command("set_github"))
@@ -354,6 +483,28 @@ async def pending(message: Message) -> None:
     await message.answer("\n".join(user_line(user) for user in users), parse_mode="Markdown")
 
 
+@router.message(Command("add_user"))
+async def add_user(message: Message) -> None:
+    if not message.from_user:
+        return
+    try:
+        target = _parse_user_to_add(message, command_mode=True)
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+    async with container_scope() as c:
+        await c.access.require_super_admin(message.from_user.id)
+        if isinstance(target[0], int):
+            user_or_invite = await c.access.add_active_user(target[0], target[1], target[2])
+        else:
+            user_or_invite = await c.access.add_allowed_username(target[0], target[1])
+    await message.answer(
+        _added_user_text(user_or_invite),
+        reply_markup=admin_panel_keyboard(),
+        parse_mode="Markdown",
+    )
+
+
 @router.message(Command("approve"))
 async def approve(message: Message) -> None:
     await _admin_status_command(message, "approve")
@@ -409,6 +560,12 @@ async def _main_menu_for(telegram_id: int):
     async with container_scope() as c:
         user = await c.access.require_active(telegram_id)
     return main_menu_keyboard(user.is_super_admin)
+
+
+async def _is_admin(telegram_id: int) -> bool:
+    async with container_scope() as c:
+        user = await c.access.require_active(telegram_id)
+    return user.is_super_admin
 
 
 def _command_args(message: Message) -> str:
@@ -493,6 +650,48 @@ def _parse_credential_payload(provider: CredentialProvider, text: str) -> dict:
         }
 
     raise ValueError("Unsupported credential type.")
+
+
+def _parse_user_to_add(message: Message, command_mode: bool = False) -> tuple[int, str, str | None] | tuple[str, str | None]:
+    forwarded_user = _forwarded_user(message)
+    if forwarded_user:
+        telegram_id = int(forwarded_user.id)
+        full_name = forwarded_user.full_name or forwarded_user.username or str(telegram_id)
+        return telegram_id, full_name, forwarded_user.username
+
+    text = _command_args(message) if command_mode else (message.text or "")
+    parts = text.strip().split(maxsplit=1)
+    if not parts:
+        raise ValueError("Send @username, numeric Telegram ID, or forward a message from the user.")
+    if parts[0].startswith("@"):
+        username = parts[0].removeprefix("@").strip().lower()
+        full_name = parts[1].strip() if len(parts) > 1 else None
+        return username, full_name
+    if not parts[0].isdigit():
+        username = parts[0].strip().lower()
+        full_name = parts[1].strip() if len(parts) > 1 else None
+        return username, full_name
+
+    telegram_id = int(parts[0])
+    full_name = parts[1].strip() if len(parts) > 1 else str(telegram_id)
+    return telegram_id, full_name, None
+
+
+def _added_user_text(user_or_invite) -> str:
+    if hasattr(user_or_invite, "telegram_id"):
+        return f"User added and activated:\n{user_line(user_or_invite)}"
+    return (
+        "Username approved.\n"
+        f"@{user_or_invite.username} will be activated automatically when they press Start."
+    )
+
+
+def _forwarded_user(message: Message):
+    legacy_user = getattr(message, "forward_from", None)
+    if legacy_user:
+        return legacy_user
+    origin = getattr(message, "forward_origin", None)
+    return getattr(origin, "sender_user", None)
 
 
 async def _projects_text(telegram_id: int) -> str:

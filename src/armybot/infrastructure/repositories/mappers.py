@@ -1,9 +1,10 @@
-from armybot.domain.entities import Deployment, Project, User, UserCredential
+from armybot.domain.entities import Deployment, Project, User, UserCredential, UsernameInvite
 from armybot.infrastructure.database.models import (
     DeploymentModel,
     ProjectModel,
     UserCredentialModel,
     UserModel,
+    UsernameInviteModel,
 )
 
 
@@ -27,6 +28,14 @@ def to_credential(model: UserCredentialModel) -> UserCredential:
         encrypted_payload=model.encrypted_payload,
         created_at=model.created_at,
         updated_at=model.updated_at,
+    )
+
+
+def to_username_invite(model: UsernameInviteModel) -> UsernameInvite:
+    return UsernameInvite(
+        username=model.username,
+        full_name=model.full_name,
+        created_at=model.created_at,
     )
 
 

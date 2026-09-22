@@ -46,6 +46,13 @@ class UserCredential:
 
 
 @dataclass(slots=True)
+class UsernameInvite:
+    username: str
+    full_name: str | None = None
+    created_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass(slots=True)
 class Project:
     id: UUID
     user_id: UUID

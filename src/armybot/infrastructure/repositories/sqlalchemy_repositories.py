@@ -3,19 +3,21 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from armybot.domain.entities import Deployment, Project, User, UserCredential
+from armybot.domain.entities import Deployment, Project, User, UserCredential, UsernameInvite
 from armybot.domain.enums import CredentialProvider, UserStatus
 from armybot.infrastructure.database.models import (
     DeploymentModel,
     ProjectModel,
     UserCredentialModel,
     UserModel,
+    UsernameInviteModel,
 )
 from armybot.infrastructure.repositories.mappers import (
     to_credential,
     to_deployment,
     to_project,
     to_user,
+    to_username_invite,
 )
 
 
@@ -25,6 +27,10 @@ class SqlUserRepository:
 
     async def get_by_telegram_id(self, telegram_id: int) -> User | None:
         model = await self.session.scalar(select(UserModel).where(UserModel.telegram_id == telegram_id))
+        return to_user(model) if model else None
+
+    async def get_by_username(self, username: str) -> User | None:
+        model = await self.session.scalar(select(UserModel).where(UserModel.username.ilike(username)))
         return to_user(model) if model else None
 
     async def add(self, user: User) -> None:
@@ -52,6 +58,25 @@ class SqlUserRepository:
     async def list_by_status(self, status: UserStatus) -> list[User]:
         rows = await self.session.scalars(select(UserModel).where(UserModel.status == status))
         return [to_user(row) for row in rows]
+
+    async def add_username_invite(self, invite: UsernameInvite) -> None:
+        model = await self.session.get(UsernameInviteModel, invite.username)
+        if model:
+            model.full_name = invite.full_name
+            return
+        self.session.add(
+            UsernameInviteModel(
+                username=invite.username,
+                full_name=invite.full_name,
+                created_at=invite.created_at,
+            )
+        )
+
+    async def get_username_invite(self, username: str) -> UsernameInvite | None:
+        if not username:
+            return None
+        model = await self.session.get(UsernameInviteModel, username)
+        return to_username_invite(model) if model else None
 
 
 class SqlCredentialRepository:

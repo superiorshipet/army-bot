@@ -1,4 +1,5 @@
 from aiogram import Bot, Dispatcher
+from aiogram.types import BotCommand
 
 from armybot.infrastructure.database.session import create_schema
 from armybot.infrastructure.database.sqlite_store import SqliteStore
@@ -16,6 +17,14 @@ async def run_bot() -> None:
         await create_schema()
 
     bot = Bot(token=settings.telegram_bot_token)
+    await bot.set_my_commands(
+        [
+            BotCommand(command="start", description="Open the bot menu"),
+            BotCommand(command="setup", description="Setup credentials"),
+            BotCommand(command="deploy", description="Deploy a project"),
+            BotCommand(command="status", description="Latest deployments"),
+        ]
+    )
     dispatcher = Dispatcher()
     dispatcher.include_router(router)
     await dispatcher.start_polling(bot)

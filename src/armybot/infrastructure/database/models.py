@@ -21,6 +21,14 @@ class UserModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class UsernameInviteModel(Base):
+    __tablename__ = "username_invites"
+
+    username: Mapped[str] = mapped_column(String(255), primary_key=True)
+    full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class UserCredentialModel(Base):
     __tablename__ = "user_credentials"
 

@@ -1,9 +1,10 @@
 import json
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from uuid import UUID
 
-from armybot.domain.entities import Deployment, Project, User, UserCredential
+from armybot.domain.entities import Deployment, Project, User, UserCredential, UsernameInvite
 from armybot.domain.enums import (
     CredentialProvider,
     DeploymentStatus,
@@ -58,6 +59,12 @@ class SqliteStore:
                     UNIQUE(user_id, provider)
                 );
 
+                CREATE TABLE IF NOT EXISTS username_invites (
+                    username TEXT PRIMARY KEY,
+                    full_name TEXT,
+                    created_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS projects (
                     id TEXT PRIMARY KEY,
                     user_id TEXT NOT NULL,
@@ -101,6 +108,11 @@ class SqliteUserRepository:
             row = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
         return _row_to_user(row) if row else None
 
+    async def get_by_username(self, username: str) -> User | None:
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT * FROM users WHERE lower(username) = ?", (username.lower(),)).fetchone()
+        return _row_to_user(row) if row else None
+
     async def add(self, user: User) -> None:
         with self.store._connect() as conn:
             conn.execute(
@@ -130,6 +142,25 @@ class SqliteUserRepository:
         with self.store._connect() as conn:
             rows = conn.execute("SELECT * FROM users WHERE status = ?", (status.value,)).fetchall()
         return [_row_to_user(row) for row in rows]
+
+    async def add_username_invite(self, invite: UsernameInvite) -> None:
+        with self.store._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO username_invites (username, full_name, created_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(username) DO UPDATE SET
+                    full_name=excluded.full_name
+                """,
+                (invite.username, invite.full_name, invite.created_at.isoformat()),
+            )
+
+    async def get_username_invite(self, username: str) -> UsernameInvite | None:
+        if not username:
+            return None
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT * FROM username_invites WHERE username = ?", (username,)).fetchone()
+        return _row_to_username_invite(row) if row else None
 
 
 class SqliteCredentialRepository:
@@ -287,6 +318,14 @@ def _row_to_credential(row: sqlite3.Row) -> UserCredential:
         encrypted_payload=row["encrypted_payload"],
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
+    )
+
+
+def _row_to_username_invite(row: sqlite3.Row) -> UsernameInvite:
+    return UsernameInvite(
+        username=row["username"],
+        full_name=row["full_name"],
+        created_at=datetime.fromisoformat(row["created_at"]),
     )
 
 
