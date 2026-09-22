@@ -1,0 +1,35 @@
+[project]
+name = "army-deploy-bot"
+version = "0.1.0"
+description = "Telegram AI DevOps bot with multi-user credentials and clean architecture."
+requires-python = ">=3.12"
+dependencies = [
+    "aiogram>=3.13.1",
+    "asyncpg>=0.29.0",
+    "cryptography>=43.0.1",
+    "pydantic>=2.9.2",
+    "pydantic-settings>=2.5.2",
+    "sqlalchemy[asyncio]>=2.0.35",
+    "structlog>=24.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.3",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.6.9",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/armybot"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
