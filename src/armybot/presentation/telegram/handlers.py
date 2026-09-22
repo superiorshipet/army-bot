@@ -359,11 +359,14 @@ async def receive_deploy_repo(message: Message, state: FSMContext) -> None:
         except Exception:
             pass
 
-    async with container_scope() as c:
-        user = await c.access.require_active(message.from_user.id)
-        deployment = await c.deploy.deploy(user, repo_url, branch, on_log=_live_log)
-    await notice.edit_text(deployment_report(deployment), parse_mode="Markdown")
-    await message.answer("What do you want to do next?", reply_markup=main_menu_keyboard(user.is_super_admin))
+    try:
+        async with container_scope() as c:
+            user = await c.access.require_active(message.from_user.id)
+            deployment = await c.deploy.deploy(user, repo_url, branch, on_log=_live_log)
+        await notice.edit_text(deployment_report(deployment), parse_mode="Markdown")
+        await message.answer("What do you want to do next?", reply_markup=main_menu_keyboard(user.is_super_admin))
+    except Exception as exc:
+        await notice.edit_text(f"❌ Deployment failed with error:\n\n`{str(exc)}`", parse_mode="Markdown")
 
 
 
@@ -489,10 +492,13 @@ async def deploy(message: Message) -> None:
         except Exception:
             pass
 
-    async with container_scope() as c:
-        user = await c.access.require_active(message.from_user.id)
-        deployment = await c.deploy.deploy(user, repo_url, branch, on_log=_live_log)
-    await notice.edit_text(deployment_report(deployment), parse_mode="Markdown")
+    try:
+        async with container_scope() as c:
+            user = await c.access.require_active(message.from_user.id)
+            deployment = await c.deploy.deploy(user, repo_url, branch, on_log=_live_log)
+        await notice.edit_text(deployment_report(deployment), parse_mode="Markdown")
+    except Exception as exc:
+        await notice.edit_text(f"❌ Deployment failed with error:\n\n`{str(exc)}`", parse_mode="Markdown")
 
 
 
