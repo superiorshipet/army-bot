@@ -2,7 +2,7 @@ from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, String, Text, func
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from armybot.domain.enums import CredentialProvider, DeploymentStatus, ProjectStack, UserRole, UserStatus
@@ -62,8 +62,8 @@ class DeploymentModel(Base):
     branch: Mapped[str] = mapped_column(String(255), default="main")
     commit_sha: Mapped[str | None] = mapped_column(String(80), nullable=True)
     live_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    logs: Mapped[list[str]] = mapped_column(JSONB, default=list)
-    deployment_metadata: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
+    logs: Mapped[list[str]] = mapped_column(JSON, default=list)
+    deployment_metadata: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

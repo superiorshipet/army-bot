@@ -133,6 +133,37 @@ async def deploy(message: Message) -> None:
     await notice.edit_text(deployment_report(deployment), parse_mode="Markdown")
 
 
+@router.message(Command("projects"))
+async def projects(message: Message) -> None:
+    if not message.from_user:
+        return
+    async with container_scope() as c:
+        user = await c.access.require_active(message.from_user.id)
+        rows = await c.projects.list_for_user(user.id)
+    if not rows:
+        await message.answer("No projects yet. Use /deploy <repo_url_or_path>.")
+        return
+    await message.answer(
+        "\n".join(
+            f"- {project.name} | {project.stack.value} | {project.live_url or 'no live url yet'}"
+            for project in rows
+        )
+    )
+
+
+@router.message(Command("status"))
+async def status(message: Message) -> None:
+    if not message.from_user:
+        return
+    async with container_scope() as c:
+        user = await c.access.require_active(message.from_user.id)
+        deployments = await c.deployments.latest_for_user(user.id, limit=5)
+    if not deployments:
+        await message.answer("Bot is running. No deployments yet.")
+        return
+    await message.answer("\n\n".join(deployment_report(item) for item in deployments), parse_mode="Markdown")
+
+
 @router.message(Command("pending"))
 async def pending(message: Message) -> None:
     if not message.from_user:
