@@ -1,14 +1,27 @@
 from aiogram import F, Router
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from armybot.domain.enums import CredentialProvider
 from armybot.infrastructure.telegram.container import container_scope
 from armybot.presentation.telegram.formatters import deployment_report, user_line
-from armybot.presentation.telegram.keyboards import access_decision_keyboard
+from armybot.presentation.telegram.keyboards import (
+    access_decision_keyboard,
+    deploy_prompt_keyboard,
+    main_menu_keyboard,
+    provider_label,
+    setup_keyboard,
+)
 from armybot.shared.settings import settings
 
 router = Router()
+
+
+class SetupFlow(StatesGroup):
+    waiting_credential = State()
+    waiting_deploy_repo = State()
 
 
 def _sender_name(message: Message) -> str:
@@ -31,8 +44,8 @@ async def start(message: Message) -> None:
 
     if user.is_active:
         await message.answer(
-            "اهلا. انت متفعل وتقدر تستخدم البوت.\n"
-            "اكتب /setup عشان تضيف الكريدنشالز، او /deploy <repo>."
+            "Welcome to Army Deploy.\nChoose what you want to do:",
+            reply_markup=main_menu_keyboard(user.is_super_admin),
         )
         return
 
@@ -50,13 +63,165 @@ async def start(message: Message) -> None:
 
 @router.message(Command("setup"))
 async def setup(message: Message) -> None:
-    await message.answer(
-        "Setup commands:\n"
-        "/set_github <token>\n"
-        "/set_cloudflare <token> [account_id] [zone_id]\n"
-        "/set_server <host> <user> <ssh_key_path> <base_path> [public_base_url]\n"
-        "/deploy <repo_url_or_path> [branch]"
+    if not message.from_user:
+        return
+    async with container_scope() as c:
+        user = await c.access.require_active(message.from_user.id)
+        saved = {credential.provider for credential in await c.credentials_repo.list_for_user(user.id)}
+    await message.answer(_setup_text(saved), reply_markup=setup_keyboard(saved))
+
+
+@router.callback_query(F.data == "menu:home")
+async def menu_home(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if not callback.from_user:
+        return
+    async with container_scope() as c:
+        user = await c.access.require_active(callback.from_user.id)
+    await callback.message.edit_text(
+        "Army Deploy main menu:",
+        reply_markup=main_menu_keyboard(user.is_super_admin),
     )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:setup")
+async def menu_setup(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if not callback.from_user:
+        return
+    async with container_scope() as c:
+        user = await c.access.require_active(callback.from_user.id)
+        saved = {credential.provider for credential in await c.credentials_repo.list_for_user(user.id)}
+    await callback.message.edit_text(_setup_text(saved), reply_markup=setup_keyboard(saved))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:deploy")
+async def menu_deploy(callback: CallbackQuery, state: FSMContext) -> None:
+    if not callback.from_user:
+        return
+    async with container_scope() as c:
+        await c.access.require_active(callback.from_user.id)
+    await state.set_state(SetupFlow.waiting_deploy_repo)
+    await callback.message.edit_text(
+        "Send the repository URL or local path.\n"
+        "Optional branch format:\n"
+        "repo_url branch\n\n"
+        "Example:\n"
+        "https://github.com/user/project main",
+        reply_markup=deploy_prompt_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:projects")
+async def menu_projects(callback: CallbackQuery) -> None:
+    if not callback.from_user:
+        return
+    text = await _projects_text(callback.from_user.id)
+    await callback.message.edit_text(text, reply_markup=await _main_menu_for(callback.from_user.id))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:status")
+async def menu_status(callback: CallbackQuery) -> None:
+    if not callback.from_user:
+        return
+    text = await _status_text(callback.from_user.id)
+    await callback.message.edit_text(text, reply_markup=await _main_menu_for(callback.from_user.id), parse_mode="Markdown")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:admin")
+async def menu_admin(callback: CallbackQuery) -> None:
+    if not callback.from_user:
+        return
+    async with container_scope() as c:
+        await c.access.require_super_admin(callback.from_user.id)
+        users = await c.access.pending_users()
+    if not users:
+        text = "Admin panel\nNo pending users."
+    else:
+        text = "Pending users:\n" + "\n".join(user_line(user) for user in users)
+    await callback.message.edit_text(text, reply_markup=main_menu_keyboard(True), parse_mode="Markdown")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cred:"))
+async def credential_button(callback: CallbackQuery, state: FSMContext) -> None:
+    if not callback.from_user or not callback.data:
+        return
+    _, action, provider_value = callback.data.split(":", 2)
+    provider = CredentialProvider(provider_value)
+    async with container_scope() as c:
+        await c.access.require_active(callback.from_user.id)
+    await state.set_state(SetupFlow.waiting_credential)
+    await state.update_data(provider=provider.value)
+    await callback.message.edit_text(
+        _credential_prompt(provider, action),
+        reply_markup=deploy_prompt_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "flow:cancel")
+async def cancel_flow(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if not callback.from_user:
+        return
+    async with container_scope() as c:
+        user = await c.access.require_active(callback.from_user.id)
+        saved = {credential.provider for credential in await c.credentials_repo.list_for_user(user.id)}
+    await callback.message.edit_text(_setup_text(saved), reply_markup=setup_keyboard(saved))
+    await callback.answer("Cancelled")
+
+
+@router.message(SetupFlow.waiting_credential)
+async def receive_credential(message: Message, state: FSMContext) -> None:
+    if not message.from_user:
+        return
+    data = await state.get_data()
+    provider = CredentialProvider(data["provider"])
+    try:
+        payload = _parse_credential_payload(provider, message.text or "")
+    except ValueError as exc:
+        await message.answer(str(exc), reply_markup=deploy_prompt_keyboard())
+        return
+
+    async with container_scope() as c:
+        user = await c.access.require_active(message.from_user.id)
+        await c.credentials.save(user, provider, payload)
+        saved = {credential.provider for credential in await c.credentials_repo.list_for_user(user.id)}
+
+    await state.clear()
+    await message.answer(
+        f"{provider_label(provider)} saved.\n\n{_setup_text(saved)}",
+        reply_markup=setup_keyboard(saved),
+    )
+
+
+@router.message(SetupFlow.waiting_deploy_repo)
+async def receive_deploy_repo(message: Message, state: FSMContext) -> None:
+    if not message.from_user:
+        return
+    args = (message.text or "").split()
+    if not args:
+        await message.answer(
+            "Send the repository URL or local path first.",
+            reply_markup=deploy_prompt_keyboard(),
+        )
+        return
+
+    repo_url = args[0]
+    branch = args[1] if len(args) > 1 else "main"
+    await state.clear()
+    notice = await message.answer("Deployment started. I will report back here.")
+    async with container_scope() as c:
+        user = await c.access.require_active(message.from_user.id)
+        deployment = await c.deploy.deploy(user, repo_url, branch)
+    await notice.edit_text(deployment_report(deployment), parse_mode="Markdown")
+    await message.answer("What do you want to do next?", reply_markup=main_menu_keyboard(user.is_super_admin))
 
 
 @router.message(Command("set_github"))
@@ -70,7 +235,11 @@ async def set_github(message: Message) -> None:
     async with container_scope() as c:
         user = await c.access.require_active(message.from_user.id)
         await c.credentials.save(user, CredentialProvider.GitHub, {"token": token})
-    await message.answer("GitHub credentials saved encrypted.")
+        saved = {credential.provider for credential in await c.credentials_repo.list_for_user(user.id)}
+    await message.answer(
+        f"GitHub saved.\n\n{_setup_text(saved)}",
+        reply_markup=setup_keyboard(saved),
+    )
 
 
 @router.message(Command("set_cloudflare"))
@@ -89,7 +258,11 @@ async def set_cloudflare(message: Message) -> None:
     async with container_scope() as c:
         user = await c.access.require_active(message.from_user.id)
         await c.credentials.save(user, CredentialProvider.Cloudflare, payload)
-    await message.answer("Cloudflare credentials saved encrypted.")
+        saved = {credential.provider for credential in await c.credentials_repo.list_for_user(user.id)}
+    await message.answer(
+        f"Cloudflare saved.\n\n{_setup_text(saved)}",
+        reply_markup=setup_keyboard(saved),
+    )
 
 
 @router.message(Command("set_server"))
@@ -112,7 +285,11 @@ async def set_server(message: Message) -> None:
     async with container_scope() as c:
         user = await c.access.require_active(message.from_user.id)
         await c.credentials.save(user, CredentialProvider.Server, payload)
-    await message.answer("Server credentials saved encrypted.")
+        saved = {credential.provider for credential in await c.credentials_repo.list_for_user(user.id)}
+    await message.answer(
+        f"Server saved.\n\n{_setup_text(saved)}",
+        reply_markup=setup_keyboard(saved),
+    )
 
 
 @router.message(Command("deploy"))
@@ -228,7 +405,112 @@ async def _admin_status_command(message: Message, action: str) -> None:
     await message.answer(f"Done:\n{user_line(user)}", parse_mode="Markdown")
 
 
+async def _main_menu_for(telegram_id: int):
+    async with container_scope() as c:
+        user = await c.access.require_active(telegram_id)
+    return main_menu_keyboard(user.is_super_admin)
+
+
 def _command_args(message: Message) -> str:
     text = message.text or ""
     parts = text.split(maxsplit=1)
     return parts[1].strip() if len(parts) > 1 else ""
+
+
+def _setup_text(saved: set[CredentialProvider]) -> str:
+    missing = [
+        provider_label(provider)
+        for provider in (CredentialProvider.GitHub, CredentialProvider.Server, CredentialProvider.Cloudflare)
+        if provider not in saved
+    ]
+    saved_names = [
+        provider_label(provider)
+        for provider in (CredentialProvider.GitHub, CredentialProvider.Server, CredentialProvider.Cloudflare)
+        if provider in saved
+    ]
+    lines = ["Credential setup"]
+    lines.append("")
+    lines.append("Saved: " + (", ".join(saved_names) if saved_names else "none yet"))
+    lines.append("Missing: " + (", ".join(missing) if missing else "all required credentials are ready"))
+    lines.append("")
+    if missing:
+        lines.append("Choose the next missing credential, then paste it in the next message.")
+    else:
+        lines.append("You are ready to deploy. Use Deploy project from the menu.")
+    return "\n".join(lines)
+
+
+def _credential_prompt(provider: CredentialProvider, action: str) -> str:
+    verb = "Update" if action == "edit" else "Add"
+    if provider == CredentialProvider.GitHub:
+        return (
+            f"{verb} GitHub credentials\n\n"
+            "Paste the GitHub token only.\n"
+            "Required access: repo read access for private repositories."
+        )
+    if provider == CredentialProvider.Cloudflare:
+        return (
+            f"{verb} Cloudflare credentials\n\n"
+            "Paste as:\n"
+            "token account_id zone_id\n\n"
+            "account_id and zone_id are optional if this deployment does not need them."
+        )
+    if provider == CredentialProvider.Server:
+        return (
+            f"{verb} server credentials\n\n"
+            "Paste as:\n"
+            "host user ssh_key_path base_path public_base_url\n\n"
+            "public_base_url is optional."
+        )
+    return f"{verb} {provider_label(provider)} credentials."
+
+
+def _parse_credential_payload(provider: CredentialProvider, text: str) -> dict:
+    args = text.strip().split()
+    if provider == CredentialProvider.GitHub:
+        if not text.strip():
+            raise ValueError("Paste the GitHub token.")
+        return {"token": text.strip()}
+
+    if provider == CredentialProvider.Cloudflare:
+        if not args:
+            raise ValueError("Paste: token account_id zone_id")
+        return {
+            "token": args[0],
+            "account_id": args[1] if len(args) > 1 else None,
+            "zone_id": args[2] if len(args) > 2 else None,
+        }
+
+    if provider == CredentialProvider.Server:
+        if len(args) < 4:
+            raise ValueError("Paste: host user ssh_key_path base_path public_base_url")
+        return {
+            "host": args[0],
+            "user": args[1],
+            "ssh_key_path": args[2],
+            "base_path": args[3],
+            "public_base_url": args[4] if len(args) > 4 else settings.public_base_url,
+        }
+
+    raise ValueError("Unsupported credential type.")
+
+
+async def _projects_text(telegram_id: int) -> str:
+    async with container_scope() as c:
+        user = await c.access.require_active(telegram_id)
+        rows = await c.projects.list_for_user(user.id)
+    if not rows:
+        return "No projects yet. Use Deploy project from the menu."
+    return "\n".join(
+        f"- {project.name} | {project.stack.value} | {project.live_url or 'no live url yet'}"
+        for project in rows
+    )
+
+
+async def _status_text(telegram_id: int) -> str:
+    async with container_scope() as c:
+        user = await c.access.require_active(telegram_id)
+        deployments = await c.deployments.latest_for_user(user.id, limit=5)
+    if not deployments:
+        return "Bot is running. No deployments yet."
+    return "\n\n".join(deployment_report(item) for item in deployments)
