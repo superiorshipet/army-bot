@@ -193,7 +193,7 @@ if [ ! -f "$APP_DIR/.env" ]; then
 fi
 
 # Auto-inject AI keys from host if available
-if [ -f /etc/army_deploy_bot.env ]; then
+if sudo test -f /etc/army_deploy_bot.env 2>/dev/null; then
   for k in GROQ_API_KEY OPENAI_API_KEY; do
     if ! grep -q "^\\$k=" "$APP_DIR/.env" 2>/dev/null; then
       v=$(sudo grep "^\\$k=" /etc/army_deploy_bot.env 2>/dev/null | cut -d'=' -f2- || true)
@@ -618,9 +618,13 @@ python3 -m venv .venv
 
 echo "[4/7] Installing Python dependencies"
 if [ -f requirements.txt ]; then
-  .venv/bin/pip install -r requirements.txt
+  if ! .venv/bin/pip install -r requirements.txt; then
+    echo "Strict requirements installation failed, retrying with relaxed version constraints..."
+    sed -E 's/==/>=/g' requirements.txt > /tmp/relaxed_req.txt
+    .venv/bin/pip install -r /tmp/relaxed_req.txt || true
+  fi
 elif [ -f pyproject.toml ]; then
-  .venv/bin/pip install .
+  .venv/bin/pip install . || true
 fi
 
 START_CMD=""
@@ -632,10 +636,46 @@ elif [ -f app.py ] && grep -qi "fastapi\\|uvicorn" app.py 2>/dev/null; then
   START_CMD=".venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port $PORT"
 elif [ -f manage.py ]; then
   .venv/bin/pip install gunicorn
+
+  python3 -c "
+import glob, re
+for f in glob.glob('**/settings*.py', recursive=True) + glob.glob('**/settings/*.py', recursive=True):
+    try:
+        content = open(f).read()
+        modified = False
+        if 'ALLOWED_HOSTS' in content:
+            new_content = re.sub(r'ALLOWED_HOSTS\s*=\s*\[[^\]]*\]', 'ALLOWED_HOSTS = [\"*\"]', content)
+            if new_content != content:
+                content = new_content
+                modified = True
+        if 'allauth' in content and 'allauth.account.middleware.AccountMiddleware' not in content:
+            if 'MIDDLEWARE = [' in content:
+                content = content.replace('MIDDLEWARE = [', 'MIDDLEWARE = [\n    \"allauth.account.middleware.AccountMiddleware\",')
+                modified = True
+        if modified:
+            open(f, 'w').write(content)
+    except Exception:
+        pass
+" 2>/dev/null || true
+
+  MAIN_SETTINGS=\$(find . -maxdepth 3 \( -name "settings.py" -o -name "base.py" \) 2>/dev/null | head -n 1 || true)
+  if [ -n "\$MAIN_SETTINGS" ] && [ -f "\$MAIN_SETTINGS" ]; then
+    if ! grep -q "FORCE_SCRIPT_NAME" "\$MAIN_SETTINGS" 2>/dev/null; then
+      printf '\nFORCE_SCRIPT_NAME = "%s"\nSTATIC_URL = "%sstatic/"\nALLOWED_HOSTS = ["*"]\n' "$ROUTE_CLEAN" "$ROUTE_PREFIX" >> "\$MAIN_SETTINGS"
+    fi
+  fi
+
+  DJANGO_SETTINGS=\$(grep -ro "DJANGO_SETTINGS_MODULE', '.*'" manage.py 2>/dev/null | head -n 1 | cut -d"'" -f4 || echo "")
+
   .venv/bin/python manage.py migrate --noinput || true
   .venv/bin/python manage.py collectstatic --noinput || true
-  WSGI_APP=$(grep -ro "WSGI_APPLICATION = '.*'" . 2>/dev/null | head -n 1 | cut -d"'" -f2 || echo "wsgi:application")
-  START_CMD=".venv/bin/gunicorn $WSGI_APP --bind 127.0.0.1:$PORT"
+
+  WSGI_APP=\$(grep -ro "WSGI_APPLICATION = '.*'" . 2>/dev/null | head -n 1 | cut -d"'" -f2 || echo "wsgi:application")
+  if [ -n "\$DJANGO_SETTINGS" ]; then
+    START_CMD=".venv/bin/gunicorn \$WSGI_APP --bind 127.0.0.1:\$PORT --env DJANGO_SETTINGS_MODULE=\$DJANGO_SETTINGS"
+  else
+    START_CMD=".venv/bin/gunicorn \$WSGI_APP --bind 127.0.0.1:\$PORT"
+  fi
 elif [ -f main.py ]; then
   START_CMD=".venv/bin/python main.py"
 elif [ -f app.py ]; then
@@ -752,11 +792,27 @@ location ^~ $ROUTE_PREFIX {{
 }}
 NGINX
 else
+  STATIC_CONF=""
+  if [ -d "$BUILD_DIR/static_root" ]; then
+    STATIC_CONF="
+location ^~ {route_prefix}static/ {{
+    alias $BUILD_DIR/static_root/;
+}}
+"
+  fi
+  if [ -d "$BUILD_DIR/media_root" ]; then
+    STATIC_CONF="\$STATIC_CONF
+location ^~ {route_prefix}media/ {{
+    alias $BUILD_DIR/media_root/;
+}}
+"
+  fi
+
   sudo tee "/etc/nginx/army-locations/$NGINX_NAME.conf" >/dev/null <<NGINX
 location = $ROUTE_CLEAN {{
     return 301 $ROUTE_PREFIX;
 }}
-
+\$STATIC_CONF
 location ^~ $ROUTE_PREFIX {{
     proxy_pass http://127.0.0.1:$PORT/;
     proxy_redirect ~^http://[^/]+/(.*) $ROUTE_PREFIX\\$1;
@@ -816,11 +872,42 @@ else
 fi
 
 echo "[3/7] Restoring .NET dependencies"
-dotnet restore
+if [ -f global.json ]; then
+  INSTALLED_SDK=$(dotnet --list-sdks 2>/dev/null | tail -n 1 | cut -d' ' -f1 || true)
+  if [ -n "$INSTALLED_SDK" ]; then
+    echo "Adjusting global.json to roll forward with installed SDK: $INSTALLED_SDK"
+    python3 -c "
+import json
+try:
+    with open('global.json', 'r') as f:
+        d = json.load(f)
+    if 'sdk' in d:
+        d['sdk']['version'] = '$INSTALLED_SDK'
+        d['sdk']['rollForward'] = 'latestMajor'
+        d['sdk']['allowPrerelease'] = True
+    with open('global.json', 'w') as f:
+        json.dump(d, f, indent=2)
+except Exception:
+    pass
+" 2>/dev/null || true
+  fi
+fi
+
+WEB_CSPROJ=$(find . -maxdepth 3 \( -name "*WebApp*.csproj" -o -name "*Web*.csproj" -o -name "*Api*.csproj" \) 2>/dev/null | head -n 1 || true)
+if [ -n "$WEB_CSPROJ" ] && [ -f "$WEB_CSPROJ" ]; then
+  echo "Targeting web project: $WEB_CSPROJ"
+  dotnet restore "$WEB_CSPROJ" || dotnet restore || true
+else
+  dotnet restore || true
+fi
 
 echo "[4/7] Publishing .NET release"
 PUBLISH_DIR="$BUILD_DIR/publish"
-dotnet publish -c Release -o "$PUBLISH_DIR"
+if [ -n "$WEB_CSPROJ" ] && [ -f "$WEB_CSPROJ" ]; then
+  dotnet publish "$WEB_CSPROJ" -c Release -o "$PUBLISH_DIR" || dotnet publish -c Release -o "$PUBLISH_DIR"
+else
+  dotnet publish -c Release -o "$PUBLISH_DIR"
+fi
 
 CLIENT_DIR=""
 for candidate in "$APP_DIR/src/client" "$APP_DIR/client" "$APP_DIR/src/frontend" "$APP_DIR/frontend" "$APP_DIR/ui"; do
