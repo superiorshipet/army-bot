@@ -196,7 +196,7 @@ fi
 if [ -f /etc/army_deploy_bot.env ]; then
   for k in GROQ_API_KEY OPENAI_API_KEY; do
     if ! grep -q "^\\$k=" "$APP_DIR/.env" 2>/dev/null; then
-      v=$(grep "^\\$k=" /etc/army_deploy_bot.env | cut -d'=' -f2- || true)
+      v=$(sudo grep "^\\$k=" /etc/army_deploy_bot.env 2>/dev/null | cut -d'=' -f2- || true)
       if [ -n "$v" ]; then
         echo "\\$k=$v" >> "$APP_DIR/.env"
       fi
@@ -240,7 +240,6 @@ fi
         return f"""#!/usr/bin/env bash
 set -euo pipefail
 {prep}
-PUBLISH_DIR="$APP_DIR/_published"
 NGINX_NAME='{nginx_name}'
 ROUTE_PREFIX='{route_prefix}'
 ROUTE_CLEAN='{route_clean}'
@@ -270,13 +269,11 @@ if [ -f package.json ]; then
   fi
 else
   echo "[4/7] Static site has no build step"
-  rm -rf "$PUBLISH_DIR"
-  mkdir -p "$PUBLISH_DIR"
-  cp -a "$BUILD_DIR"/. "$PUBLISH_DIR"/
+  rm -rf "$APP_DIR/_published" 2>/dev/null || true
   if [ -f "$BUILD_DIR/$APP_ENTRY" ] && [ "$APP_ENTRY" != "index.html" ]; then
-    cp "$BUILD_DIR/$APP_ENTRY" "$PUBLISH_DIR/index.html"
+    cp -f "$BUILD_DIR/$APP_ENTRY" "$BUILD_DIR/index.html"
   fi
-  OUTPUT_DIR="$PUBLISH_DIR"
+  OUTPUT_DIR="$BUILD_DIR"
 fi
 
 echo "[5/7] Writing nginx location include"
