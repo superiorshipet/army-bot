@@ -180,6 +180,47 @@ if [ ! -d "$BUILD_DIR" ]; then
   echo "Configured app path does not exist: $APP_PATH" >&2
   exit 19
 fi
+
+# Prepare .env file if missing
+if [ ! -f "$APP_DIR/.env" ]; then
+  if [ -f "$APP_DIR/.env.example" ]; then
+    cp "$APP_DIR/.env.example" "$APP_DIR/.env"
+  elif [ -f "$BUILD_DIR/.env.example" ]; then
+    cp "$BUILD_DIR/.env.example" "$APP_DIR/.env"
+  else
+    touch "$APP_DIR/.env"
+  fi
+fi
+
+# Auto-inject AI keys from host if available
+if [ -f /etc/army_deploy_bot.env ]; then
+  for k in GROQ_API_KEY OPENAI_API_KEY; do
+    if ! grep -q "^\\$k=" "$APP_DIR/.env" 2>/dev/null; then
+      v=$(grep "^\\$k=" /etc/army_deploy_bot.env | cut -d'=' -f2- || true)
+      if [ -n "$v" ]; then
+        echo "\\$k=$v" >> "$APP_DIR/.env"
+      fi
+    fi
+  done
+fi
+
+# Auto-provision PostgreSQL database if project uses Postgres
+DB_ROLE=$(echo "{project}" | tr '-' '_' | tr '.' '_')
+if grep -rqi "postgresql\\|npgsql\\|psycopg\\|postgres:\\|pg_hba" "$APP_DIR" --exclude-dir=".git" --exclude-dir="node_modules" --exclude-dir=".venv" 2>/dev/null; then
+  sudo -u postgres psql -c "DO \\$\\$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '$DB_ROLE') THEN CREATE ROLE $DB_ROLE WITH LOGIN PASSWORD 'pass_$DB_ROLE'; END IF; END \\$\\$;" 2>/dev/null || true
+  sudo -u postgres psql -c "SELECT 1 FROM pg_database WHERE datname = '$DB_ROLE'" 2>/dev/null | grep -q 1 || sudo -u postgres psql -c "CREATE DATABASE $DB_ROLE OWNER $DB_ROLE;" 2>/dev/null || true
+  sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE $DB_ROLE TO $DB_ROLE;" 2>/dev/null || true
+  if ! grep -q "^DATABASE_URL=" "$APP_DIR/.env" 2>/dev/null; then
+    echo "DATABASE_URL=postgresql://$DB_ROLE:pass_$DB_ROLE@localhost:5432/$DB_ROLE" >> "$APP_DIR/.env"
+  fi
+fi
+
+# Auto-inject Redis URL if redis is referenced
+if grep -rqi "redis" "$APP_DIR" --exclude-dir=".git" --exclude-dir="node_modules" --exclude-dir=".venv" 2>/dev/null; then
+  if ! grep -q "^REDIS_URL=" "$APP_DIR/.env" 2>/dev/null; then
+    echo "REDIS_URL=localhost:6379" >> "$APP_DIR/.env"
+  fi
+fi
 """
 
     @staticmethod
@@ -436,6 +477,81 @@ location ^~ $ROUTE_PREFIX {{
     proxy_read_timeout 90;
 }}
 NGINX
+CLIENT_DIR=""
+if [ "$IS_NEXT" != "true" ]; then
+  for candidate in "$APP_DIR/src/client" "$APP_DIR/client" "$APP_DIR/src/frontend" "$APP_DIR/frontend" "$APP_DIR/ui"; do
+    if [ -f "$candidate/package.json" ]; then
+      CLIENT_DIR="$candidate"
+      break
+    fi
+  done
+
+  if [ -n "$CLIENT_DIR" ]; then
+    echo "Building frontend client in $CLIENT_DIR..."
+    cd "$CLIENT_DIR"
+    npm install
+    python3 -c "
+import glob
+for f in glob.glob('$CLIENT_DIR/src/**/router*.*', recursive=True):
+    try:
+        content = open(f).read()
+        if 'createBrowserRouter(' in content and 'basename' not in content:
+            new_content = content.replace(']);', '], {{{{ basename: import.meta.env.BASE_URL }}}});')
+            if new_content != content:
+                open(f, 'w').write(new_content)
+    except Exception:
+        pass
+" 2>/dev/null || true
+    VITE_API_BASE_URL="$ROUTE_CLEAN" npm run build -- --base="$ROUTE_PREFIX" || npm run build || true
+    cd "$BUILD_DIR"
+  fi
+fi
+
+CLIENT_DIST=""
+if [ -n "$CLIENT_DIR" ]; then
+  if [ -d "$CLIENT_DIR/dist" ]; then
+    CLIENT_DIST="$CLIENT_DIR/dist"
+  elif [ -d "$CLIENT_DIR/build" ]; then
+    CLIENT_DIST="$CLIENT_DIR/build"
+  fi
+fi
+
+if [ -n "$CLIENT_DIST" ]; then
+sudo tee "/etc/nginx/army-locations/$NGINX_NAME.conf" >/dev/null <<NGINX
+location = $ROUTE_CLEAN {{
+    return 301 $ROUTE_PREFIX;
+}}
+
+location ^~ {route_prefix}api/ {{
+    proxy_pass http://127.0.0.1:$PORT/api/;
+    proxy_http_version 1.1;
+    proxy_set_header Host \\$http_host;
+    proxy_set_header X-Real-IP \\$remote_addr;
+    proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \\$scheme;
+    proxy_set_header Upgrade \\$http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 90;
+}}
+
+location ^~ {route_prefix}socket.io/ {{
+    proxy_pass http://127.0.0.1:$PORT/socket.io/;
+    proxy_http_version 1.1;
+    proxy_set_header Host \\$http_host;
+    proxy_set_header X-Real-IP \\$remote_addr;
+    proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \\$scheme;
+    proxy_set_header Upgrade \\$http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 90;
+}}
+
+location ^~ $ROUTE_PREFIX {{
+    alias $CLIENT_DIST/;
+    index index.html;
+    try_files \\$uri \\$uri/ $ROUTE_PREFIX/index.html;
+}}
+NGINX
 else
 sudo tee "/etc/nginx/army-locations/$NGINX_NAME.conf" >/dev/null <<NGINX
 location = $ROUTE_CLEAN {{
@@ -454,6 +570,7 @@ location ^~ $ROUTE_PREFIX {{
     proxy_read_timeout 90;
 }}
 NGINX
+fi
 fi
 
 sudo nginx -t
@@ -530,6 +647,34 @@ else
   START_CMD=".venv/bin/python -m http.server $PORT"
 fi
 
+CLIENT_DIR=""
+for candidate in "$APP_DIR/src/client" "$APP_DIR/client" "$APP_DIR/src/frontend" "$APP_DIR/frontend" "$APP_DIR/ui"; do
+  if [ -f "$candidate/package.json" ]; then
+    CLIENT_DIR="$candidate"
+    break
+  fi
+done
+
+if [ -n "$CLIENT_DIR" ]; then
+  echo "Building frontend client in $CLIENT_DIR..."
+  cd "$CLIENT_DIR"
+  npm install
+  python3 -c "
+import glob
+for f in glob.glob('$CLIENT_DIR/src/**/router*.*', recursive=True):
+    try:
+        content = open(f).read()
+        if 'createBrowserRouter(' in content and 'basename' not in content:
+            new_content = content.replace(']);', '], {{{{ basename: import.meta.env.BASE_URL }}}});')
+            if new_content != content:
+                open(f, 'w').write(new_content)
+    except Exception:
+        pass
+" 2>/dev/null || true
+  VITE_API_BASE_URL="$ROUTE_CLEAN" npm run build -- --base="$ROUTE_PREFIX" || npm run build || true
+  cd "$BUILD_DIR"
+fi
+
 echo "[5/7] Configuring systemd service"
 sudo tee "/etc/systemd/system/$SERVICE_NAME.service" >/dev/null <<SERVICE
 [Unit]
@@ -557,13 +702,68 @@ sudo systemctl restart "$SERVICE_NAME.service"
 
 echo "[6/7] Writing nginx proxy include"
 sudo mkdir -p /etc/nginx/army-locations
-sudo tee "/etc/nginx/army-locations/$NGINX_NAME.conf" >/dev/null <<NGINX
+
+CLIENT_DIST=""
+if [ -n "$CLIENT_DIR" ]; then
+  if [ -d "$CLIENT_DIR/dist" ]; then
+    CLIENT_DIST="$CLIENT_DIR/dist"
+  elif [ -d "$CLIENT_DIR/build" ]; then
+    CLIENT_DIST="$CLIENT_DIR/build"
+  fi
+fi
+
+if [ -n "$CLIENT_DIST" ]; then
+  sudo tee "/etc/nginx/army-locations/$NGINX_NAME.conf" >/dev/null <<NGINX
+location = $ROUTE_CLEAN {{
+    return 301 $ROUTE_PREFIX;
+}}
+
+location ^~ {route_prefix}api/ {{
+    proxy_pass http://127.0.0.1:$PORT/api/;
+    proxy_http_version 1.1;
+    proxy_set_header Host \\$http_host;
+    proxy_set_header X-Real-IP \\$remote_addr;
+    proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \\$scheme;
+    proxy_set_header Upgrade \\$http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 90;
+}}
+
+location ^~ {route_prefix}docs {{
+    proxy_pass http://127.0.0.1:$PORT/docs;
+    proxy_http_version 1.1;
+    proxy_set_header Host \\$http_host;
+    proxy_set_header X-Real-IP \\$remote_addr;
+    proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \\$scheme;
+}}
+
+location ^~ {route_prefix}openapi.json {{
+    proxy_pass http://127.0.0.1:$PORT/openapi.json;
+    proxy_http_version 1.1;
+    proxy_set_header Host \\$http_host;
+    proxy_set_header X-Real-IP \\$remote_addr;
+    proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \\$scheme;
+}}
+
+location ^~ $ROUTE_PREFIX {{
+    alias $CLIENT_DIST/;
+    index index.html;
+    try_files \\$uri \\$uri/ $ROUTE_PREFIX/index.html;
+}}
+NGINX
+else
+  sudo tee "/etc/nginx/army-locations/$NGINX_NAME.conf" >/dev/null <<NGINX
 location = $ROUTE_CLEAN {{
     return 301 $ROUTE_PREFIX;
 }}
 
 location ^~ $ROUTE_PREFIX {{
     proxy_pass http://127.0.0.1:$PORT/;
+    proxy_redirect ~^http://[^/]+/(.*) $ROUTE_PREFIX\\$1;
+    proxy_redirect / $ROUTE_PREFIX;
     proxy_http_version 1.1;
     proxy_set_header Host \\$http_host;
     proxy_set_header X-Real-IP \\$remote_addr;
@@ -574,6 +774,7 @@ location ^~ $ROUTE_PREFIX {{
     proxy_read_timeout 90;
 }}
 NGINX
+fi
 
 sudo nginx -t
 sudo systemctl reload nginx

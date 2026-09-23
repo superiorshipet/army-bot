@@ -72,3 +72,36 @@ def test_dotnet_site_script_contains_frontend_support():
     assert "location ^~ /my-dotnet-app/scalar/" in script
     assert "try_files \\$uri \\$uri/ $ROUTE_PREFIX/index.html;" in script
 
+
+def test_python_site_script_contains_frontend_support():
+    plan = DeploymentPlan(
+        project_name="my-fastapi-app",
+        repo_url="https://github.com/example/my-fastapi-app",
+        branch="main",
+        stack=ProjectStack.Python,
+        build_steps=["pip install -r requirements.txt"],
+        runtime="systemd",
+        notes=[],
+        app_path=".",
+        app_entry="",
+    )
+    server = {
+        "base_path": "/var/www",
+        "public_base_url": "https://example.com",
+    }
+    script = RemoteRecipeDeployExecutor._python_site_script(plan, server, "https://example.com/my-fastapi-app/")
+
+    assert "CLIENT_DIR=" in script
+    assert "Building frontend client in $CLIENT_DIR" in script
+    assert "location ^~ /my-fastapi-app/api/" in script
+    assert "location ^~ /my-fastapi-app/docs" in script
+    assert "try_files \\$uri \\$uri/ $ROUTE_PREFIX/index.html;" in script
+
+
+def test_common_git_prep_contains_db_and_env():
+    prep = RemoteRecipeDeployExecutor._common_git_prep("test-proj", "https://github.com/ex/test", "main", "/var/www", ".")
+    assert "DATABASE_URL=" in prep
+    assert "GROQ_API_KEY" in prep
+    assert "CREATE DATABASE" in prep
+
+
