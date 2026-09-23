@@ -505,6 +505,20 @@ sudo systemctl restart "$SERVICE_NAME.service"
 
 echo "[6/7] Writing nginx proxy include"
 sudo mkdir -p /etc/nginx/army-locations
+
+CLIENT_DIST=""
+if [ -n "$CLIENT_DIR" ]; then
+  if [ -d "$CLIENT_DIR/dist" ]; then
+    CLIENT_DIST="$CLIENT_DIR/dist"
+  elif [ -d "$CLIENT_DIR/build" ]; then
+    CLIENT_DIST="$CLIENT_DIR/build"
+  fi
+fi
+
+if [ -n "$CLIENT_DIST" ] && [ -d "$CLIENT_DIST" ]; then
+  find "$CLIENT_DIST" -name "index.html" -exec sed -i 's|href="/|href="./|g; s|src="/|src="./|g' {{}} + 2>/dev/null || true
+fi
+
 if [ "$IS_NEXT" = "true" ]; then
 sudo tee "/etc/nginx/army-locations/$NGINX_NAME.conf" >/dev/null <<NGINX
 location = $ROUTE_CLEAN {{
@@ -531,16 +545,6 @@ location ^~ $ROUTE_PREFIX {{
     proxy_read_timeout 90;
 }}
 NGINX
-
-CLIENT_DIST=""
-if [ -n "$CLIENT_DIR" ]; then
-  if [ -d "$CLIENT_DIR/dist" ]; then
-    CLIENT_DIST="$CLIENT_DIR/dist"
-  elif [ -d "$CLIENT_DIR/build" ]; then
-    CLIENT_DIST="$CLIENT_DIR/build"
-  fi
-fi
-
 elif [ -n "$CLIENT_DIST" ]; then
 sudo tee "/etc/nginx/army-locations/$NGINX_NAME.conf" >/dev/null <<NGINX
 location = $ROUTE_CLEAN {{
