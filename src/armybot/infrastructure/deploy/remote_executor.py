@@ -436,19 +436,46 @@ if [ -n "$CLIENT_DIR" ]; then
   echo "Building frontend client in $CLIENT_DIR..."
   cd "$CLIENT_DIR"
   npm install
+
+  # Configure API and Base URLs for Vite, CRA, Webpack, and React Router
+  echo "API_URL=$ROUTE_CLEAN/api" >> "$CLIENT_DIR/.env"
+  echo "REACT_APP_API_URL=$ROUTE_CLEAN/api" >> "$CLIENT_DIR/.env"
+  echo "VITE_API_BASE_URL=$ROUTE_CLEAN" >> "$CLIENT_DIR/.env"
+  echo "PUBLIC_URL=$ROUTE_PREFIX" >> "$CLIENT_DIR/.env"
+
   python3 -c "
-import glob
-for f in glob.glob('$CLIENT_DIR/src/**/router*.*', recursive=True):
+import glob, re
+for f in glob.glob('$CLIENT_DIR/webpack*.*', recursive=True) + glob.glob('$CLIENT_DIR/webpack/**/*.*', recursive=True):
     try:
         content = open(f).read()
+        if \"publicPath: '/'\" in content:
+            content = content.replace(\"publicPath: '/'\", \"publicPath: '$ROUTE_PREFIX'\")
+            open(f, 'w').write(content)
+    except Exception:
+        pass
+
+for f in glob.glob('$CLIENT_DIR/**/*.js', recursive=True) + glob.glob('$CLIENT_DIR/**/*.jsx', recursive=True) + glob.glob('$CLIENT_DIR/**/*.ts', recursive=True) + glob.glob('$CLIENT_DIR/**/*.tsx', recursive=True):
+    if 'node_modules' in f or 'dist' in f or 'build' in f:
+        continue
+    try:
+        content = open(f).read()
+        modified = False
+        if 'createBrowserHistory(' in content and 'basename:' in content:
+            content = re.sub(r\"basename:\s*['\\\"][^'\\\"]*['\\\"]\", f\"basename: '$ROUTE_CLEAN'\", content)
+            modified = True
         if 'createBrowserRouter(' in content and 'basename' not in content:
-            new_content = content.replace(']);', '], {{{{ basename: import.meta.env.BASE_URL }}}});')
-            if new_content != content:
-                open(f, 'w').write(new_content)
+            content = content.replace(']);', f'], {{{{ basename: \"$ROUTE_CLEAN\" }}}});')
+            modified = True
+        if '<BrowserRouter' in content and 'basename' not in content:
+            content = content.replace('<BrowserRouter', f'<BrowserRouter basename=\"$ROUTE_CLEAN\"')
+            modified = True
+        if modified:
+            open(f, 'w').write(content)
     except Exception:
         pass
 " 2>/dev/null || true
-  VITE_API_BASE_URL="$ROUTE_CLEAN" npm run build -- --base="$ROUTE_PREFIX" || npm run build || true
+
+  API_URL="$ROUTE_CLEAN/api" REACT_APP_API_URL="$ROUTE_CLEAN/api" PUBLIC_URL="$ROUTE_PREFIX" VITE_API_BASE_URL="$ROUTE_CLEAN" npm run build -- --base="$ROUTE_PREFIX" || npm run build || true
   cd "$BUILD_DIR"
 fi
 
