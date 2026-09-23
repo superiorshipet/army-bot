@@ -224,6 +224,7 @@ fi
 
 # Auto-inject MongoDB URI if mongodb is referenced
 if grep -rqi "mongodb\\|mongoose" "$APP_DIR" --exclude-dir=".git" --exclude-dir="node_modules" 2>/dev/null; then
+  sudo systemctl is-active mongod >/dev/null 2>&1 || sudo systemctl start mongod 2>/dev/null || true
   if ! grep -q "^MONGO_URI=" "$APP_DIR/.env" 2>/dev/null; then
     echo "MONGO_URI=mongodb://127.0.0.1:27017/$DB_ROLE" >> "$APP_DIR/.env"
   fi
@@ -240,9 +241,11 @@ if grep -rqi "JWT_SECRET" "$APP_DIR" --exclude-dir=".git" --exclude-dir="node_mo
   fi
 fi
 
-if [ -d "$APP_DIR/server" ] && [ -f "$APP_DIR/.env" ]; then
-  cp "$APP_DIR/.env" "$APP_DIR/server/.env" 2>/dev/null || true
-fi
+for subenv in "$APP_DIR/server" "$APP_DIR/backend" "$APP_DIR/api"; do
+  if [ -d "$subenv" ] && [ -f "$APP_DIR/.env" ]; then
+    cp "$APP_DIR/.env" "$subenv/.env" 2>/dev/null || true
+  fi
+done
 """
 
     @staticmethod
@@ -296,6 +299,19 @@ else
     cp -f "$BUILD_DIR/$APP_ENTRY" "$BUILD_DIR/index.html"
   fi
   OUTPUT_DIR="$BUILD_DIR"
+fi
+
+if [ -d "$OUTPUT_DIR" ]; then
+  find "$OUTPUT_DIR" -type f \( -name "*.html" -o -name "*.js" -o -name "*.css" \) -exec sed -i \
+    -e "s|href=\"/favicon.ico\"|href=\"$ROUTE_PREFIX/favicon.ico\"|g" \
+    -e "s|href=\"/images/favicon.ico\"|href=\"$ROUTE_PREFIX/images/favicon.ico\"|g" \
+    -e "s|['\"]/images/|'$ROUTE_PREFIX/images/|g" \
+    -e "s|['\"]/assets/|'$ROUTE_PREFIX/assets/|g" \
+    -e "s|url(['\"]/images/|url('$ROUTE_PREFIX/images/|g" \
+    -e "s|url(/images/|url($ROUTE_PREFIX/images/|g" \
+    -e "s|url(['\"]/assets/|url('$ROUTE_PREFIX/assets/|g" \
+    -e "s|url(/assets/|url($ROUTE_PREFIX/assets/|g" \
+    {{}} + 2>/dev/null || true
 fi
 
 echo "[5/7] Writing nginx location include"
@@ -417,6 +433,12 @@ if grep -q '"next"' package.json 2>/dev/null; then
   IS_NEXT=true
   echo "Configuring Next.js subpath support: $ROUTE_CLEAN"
   {RemoteRecipeDeployExecutor._NEXT_BASEPATH_INJECTOR}
+fi
+
+# Auto-generate Prisma client and push DB schema if Prisma exists
+if [ -f prisma/schema.prisma ] || [ -f server/prisma/schema.prisma ]; then
+  npx prisma generate 2>/dev/null || true
+  npx prisma db push --skip-generate 2>/dev/null || true
 fi
 
 echo "[4/7] Building application (if script exists)"
@@ -544,6 +566,16 @@ fi
 
 if [ -n "$CLIENT_DIST" ] && [ -d "$CLIENT_DIST" ]; then
   find "$CLIENT_DIST" -name "index.html" -exec sed -i 's|href="/|href="./|g; s|src="/|src="./|g' {{}} + 2>/dev/null || true
+  find "$CLIENT_DIST" -type f \( -name "*.html" -o -name "*.js" -o -name "*.css" -o -name "*.json" \) -exec sed -i \
+    -e "s|['\"]/images/|'$ROUTE_PREFIX/images/|g" \
+    -e "s|['\"]/assets/|'$ROUTE_PREFIX/assets/|g" \
+    -e "s|url(['\"]/images/|url('$ROUTE_PREFIX/images/|g" \
+    -e "s|url(/images/|url($ROUTE_PREFIX/images/|g" \
+    -e "s|url(['\"]/assets/|url('$ROUTE_PREFIX/assets/|g" \
+    -e "s|url(/assets/|url($ROUTE_PREFIX/assets/|g" \
+    -e "s|href=\"/favicon.ico\"|href=\"$ROUTE_PREFIX/favicon.ico\"|g" \
+    -e "s|href=\"/images/favicon.ico\"|href=\"$ROUTE_PREFIX/images/favicon.ico\"|g" \
+    {{}} + 2>/dev/null || true
 fi
 
 if [ "$IS_NEXT" = "true" ]; then
@@ -807,6 +839,20 @@ if [ -n "$CLIENT_DIR" ]; then
   fi
 fi
 
+if [ -n "$CLIENT_DIST" ] && [ -d "$CLIENT_DIST" ]; then
+  find "$CLIENT_DIST" -name "index.html" -exec sed -i 's|href="/|href="./|g; s|src="/|src="./|g' {{}} + 2>/dev/null || true
+  find "$CLIENT_DIST" -type f \( -name "*.html" -o -name "*.js" -o -name "*.css" -o -name "*.json" \) -exec sed -i \
+    -e "s|['\"]/images/|'$ROUTE_PREFIX/images/|g" \
+    -e "s|['\"]/assets/|'$ROUTE_PREFIX/assets/|g" \
+    -e "s|url(['\"]/images/|url('$ROUTE_PREFIX/images/|g" \
+    -e "s|url(/images/|url($ROUTE_PREFIX/images/|g" \
+    -e "s|url(['\"]/assets/|url('$ROUTE_PREFIX/assets/|g" \
+    -e "s|url(/assets/|url($ROUTE_PREFIX/assets/|g" \
+    -e "s|href=\"/favicon.ico\"|href=\"$ROUTE_PREFIX/favicon.ico\"|g" \
+    -e "s|href=\"/images/favicon.ico\"|href=\"$ROUTE_PREFIX/images/favicon.ico\"|g" \
+    {{}} + 2>/dev/null || true
+fi
+
 if [ -n "$CLIENT_DIST" ]; then
   sudo tee "/etc/nginx/army-locations/$NGINX_NAME.conf" >/dev/null <<NGINX
 location = $ROUTE_CLEAN {{
@@ -1038,6 +1084,20 @@ if [ -n "$CLIENT_DIR" ]; then
   elif [ -d "$CLIENT_DIR/build" ]; then
     CLIENT_DIST="$CLIENT_DIR/build"
   fi
+fi
+
+if [ -n "$CLIENT_DIST" ] && [ -d "$CLIENT_DIST" ]; then
+  find "$CLIENT_DIST" -name "index.html" -exec sed -i 's|href="/|href="./|g; s|src="/|src="./|g' {{}} + 2>/dev/null || true
+  find "$CLIENT_DIST" -type f \( -name "*.html" -o -name "*.js" -o -name "*.css" -o -name "*.json" \) -exec sed -i \
+    -e "s|['\"]/images/|'$ROUTE_PREFIX/images/|g" \
+    -e "s|['\"]/assets/|'$ROUTE_PREFIX/assets/|g" \
+    -e "s|url(['\"]/images/|url('$ROUTE_PREFIX/images/|g" \
+    -e "s|url(/images/|url($ROUTE_PREFIX/images/|g" \
+    -e "s|url(['\"]/assets/|url('$ROUTE_PREFIX/assets/|g" \
+    -e "s|url(/assets/|url($ROUTE_PREFIX/assets/|g" \
+    -e "s|href=\"/favicon.ico\"|href=\"$ROUTE_PREFIX/favicon.ico\"|g" \
+    -e "s|href=\"/images/favicon.ico\"|href=\"$ROUTE_PREFIX/images/favicon.ico\"|g" \
+    {{}} + 2>/dev/null || true
 fi
 
 if [ -n "$CLIENT_DIST" ]; then

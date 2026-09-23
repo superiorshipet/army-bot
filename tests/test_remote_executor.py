@@ -103,5 +103,48 @@ def test_common_git_prep_contains_db_and_env():
     assert "DATABASE_URL=" in prep
     assert "GROQ_API_KEY" in prep
     assert "CREATE DATABASE" in prep
+    assert "systemctl is-active mongod" in prep
+
+
+def test_node_site_script_contains_asset_normalization_and_prisma():
+    plan = DeploymentPlan(
+        project_name="my-node-app",
+        repo_url="https://github.com/example/my-node-app",
+        branch="main",
+        stack=ProjectStack.Node,
+        build_steps=["npm install"],
+        runtime="node",
+        notes=[],
+        app_path=".",
+        app_entry="",
+    )
+    server = {
+        "base_path": "/var/www",
+        "public_base_url": "https://example.com",
+    }
+    script = RemoteRecipeDeployExecutor._node_site_script(plan, server, "https://example.com/my-node-app/")
+    assert "prisma db push" in script
+    assert "$ROUTE_PREFIX/images/" in script
+
+
+def test_static_site_script_contains_asset_normalization():
+    plan = DeploymentPlan(
+        project_name="my-static-app",
+        repo_url="https://github.com/example/my-static-app",
+        branch="main",
+        stack=ProjectStack.Static,
+        build_steps=[],
+        runtime="nginx-static",
+        notes=[],
+        app_path=".",
+        app_entry="index.html",
+    )
+    server = {
+        "base_path": "/var/www",
+        "public_base_url": "https://example.com",
+    }
+    script = RemoteRecipeDeployExecutor._static_site_script(plan, server, "https://example.com/my-static-app/")
+    assert "$ROUTE_PREFIX/images/" in script
+
 
 
