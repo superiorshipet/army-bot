@@ -621,7 +621,13 @@ echo "[4/7] Publishing .NET release"
 PUBLISH_DIR="$BUILD_DIR/publish"
 dotnet publish -c Release -o "$PUBLISH_DIR"
 
-DLL_FILE=$(find "$PUBLISH_DIR" -maxdepth 1 -name "*.dll" ! -name "Microsoft.*" ! -name "System.*" | head -n 1)
+RUNTIMECFG=$(ls "$PUBLISH_DIR"/*.runtimeconfig.json 2>/dev/null | head -n 1 || true)
+if [ -n "$RUNTIMECFG" ]; then
+  APP_NAME=$(echo "$RUNTIMECFG" | sed 's/\\.runtimeconfig\\.json$//')
+  DLL_FILE="${APP_NAME}.dll"
+else
+  DLL_FILE=$(find "$PUBLISH_DIR" -maxdepth 1 -name "*.dll" ! -name "Microsoft.*" ! -name "System.*" ! -name "Npgsql*" ! -name "OpenAI*" ! -name "StackExchange*" | head -n 1)
+fi
 
 echo "[5/7] Configuring systemd service"
 sudo tee "/etc/systemd/system/$SERVICE_NAME.service" >/dev/null <<SERVICE
@@ -633,7 +639,7 @@ After=network.target
 Type=simple
 User=$USER
 WorkingDirectory=$PUBLISH_DIR
-Environment=ASPNETCORE_ENVIRONMENT=Production
+Environment=ASPNETCORE_ENVIRONMENT=Development
 Environment=ASPNETCORE_URLS=http://127.0.0.1:$PORT
 ExecStart=/usr/bin/dotnet $DLL_FILE --urls "http://127.0.0.1:$PORT"
 Restart=always
@@ -656,6 +662,8 @@ location = $ROUTE_CLEAN {{
 
 location ^~ $ROUTE_PREFIX {{
     proxy_pass http://127.0.0.1:$PORT/;
+    proxy_redirect ~^http://[^/]+/(.*) $ROUTE_PREFIX\\$1;
+    proxy_redirect / $ROUTE_PREFIX;
     proxy_http_version 1.1;
     proxy_set_header Host \\$http_host;
     proxy_set_header X-Real-IP \\$remote_addr;
