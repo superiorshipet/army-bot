@@ -46,3 +46,29 @@ def test_static_site_script_contains_vite_base():
     script = RemoteRecipeDeployExecutor._static_site_script(plan, server, "https://example.com/my-vite-app/")
 
     assert '--base="$ROUTE_PREFIX"' in script
+
+
+def test_dotnet_site_script_contains_frontend_support():
+    plan = DeploymentPlan(
+        project_name="my-dotnet-app",
+        repo_url="https://github.com/example/my-dotnet-app",
+        branch="main",
+        stack=ProjectStack.DotNet,
+        build_steps=["dotnet restore", "dotnet publish -c Release"],
+        runtime="systemd",
+        notes=[],
+        app_path=".",
+        app_entry="",
+    )
+    server = {
+        "base_path": "/var/www",
+        "public_base_url": "https://example.com",
+    }
+    script = RemoteRecipeDeployExecutor._dotnet_site_script(plan, server, "https://example.com/my-dotnet-app/")
+
+    assert "CLIENT_DIR=" in script
+    assert "Building frontend client in $CLIENT_DIR" in script
+    assert "location ^~ /my-dotnet-app/api/" in script
+    assert "location ^~ /my-dotnet-app/scalar/" in script
+    assert "try_files \\$uri \\$uri/ $ROUTE_PREFIX/index.html;" in script
+

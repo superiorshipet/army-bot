@@ -248,6 +248,7 @@ location = $ROUTE_CLEAN {{
 location ^~ $ROUTE_PREFIX {{
     alias $OUTPUT_DIR/;
     index index.html;
+    try_files \$uri \$uri/ $ROUTE_PREFIX/index.html;
 }}
 NGINX
 
@@ -621,10 +622,38 @@ echo "[4/7] Publishing .NET release"
 PUBLISH_DIR="$BUILD_DIR/publish"
 dotnet publish -c Release -o "$PUBLISH_DIR"
 
+CLIENT_DIR=""
+for candidate in "$APP_DIR/src/client" "$APP_DIR/client" "$APP_DIR/src/frontend" "$APP_DIR/frontend" "$APP_DIR/ui"; do
+  if [ -f "$candidate/package.json" ]; then
+    CLIENT_DIR="$candidate"
+    break
+  fi
+done
+
+if [ -n "$CLIENT_DIR" ]; then
+  echo "Building frontend client in $CLIENT_DIR..."
+  cd "$CLIENT_DIR"
+  npm install
+  python3 -c "
+import glob
+for f in glob.glob('$CLIENT_DIR/src/**/router*.*', recursive=True):
+    try:
+        content = open(f).read()
+        if 'createBrowserRouter(' in content and 'basename' not in content:
+            new_content = content.replace(']);', '], {{{{ basename: import.meta.env.BASE_URL }}}});')
+            if new_content != content:
+                open(f, 'w').write(new_content)
+    except Exception:
+        pass
+" 2>/dev/null || true
+  VITE_API_BASE_URL="$ROUTE_CLEAN" npm run build -- --base="$ROUTE_PREFIX" || npm run build || true
+  cd "$BUILD_DIR"
+fi
+
 RUNTIMECFG=$(ls "$PUBLISH_DIR"/*.runtimeconfig.json 2>/dev/null | head -n 1 || true)
 if [ -n "$RUNTIMECFG" ]; then
   APP_NAME=$(echo "$RUNTIMECFG" | sed 's/\\.runtimeconfig\\.json$//')
-  DLL_FILE="${APP_NAME}.dll"
+  DLL_FILE="${{APP_NAME}}.dll"
 else
   DLL_FILE=$(find "$PUBLISH_DIR" -maxdepth 1 -name "*.dll" ! -name "Microsoft.*" ! -name "System.*" ! -name "Npgsql*" ! -name "OpenAI*" ! -name "StackExchange*" | head -n 1)
 fi
@@ -655,7 +684,72 @@ sudo systemctl restart "$SERVICE_NAME.service"
 
 echo "[6/7] Writing nginx proxy include"
 sudo mkdir -p /etc/nginx/army-locations
-sudo tee "/etc/nginx/army-locations/$NGINX_NAME.conf" >/dev/null <<NGINX
+
+CLIENT_DIST=""
+if [ -n "$CLIENT_DIR" ]; then
+  if [ -d "$CLIENT_DIR/dist" ]; then
+    CLIENT_DIST="$CLIENT_DIR/dist"
+  elif [ -d "$CLIENT_DIR/build" ]; then
+    CLIENT_DIST="$CLIENT_DIR/build"
+  fi
+fi
+
+if [ -n "$CLIENT_DIST" ]; then
+  sudo tee "/etc/nginx/army-locations/$NGINX_NAME.conf" >/dev/null <<NGINX
+location = $ROUTE_CLEAN {{
+    return 301 $ROUTE_PREFIX;
+}}
+
+location ^~ {route_prefix}api/ {{
+    proxy_pass http://127.0.0.1:$PORT/api/;
+    proxy_http_version 1.1;
+    proxy_set_header Host \\$http_host;
+    proxy_set_header X-Real-IP \\$remote_addr;
+    proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \\$scheme;
+    proxy_set_header Upgrade \\$http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 90;
+}}
+
+location ^~ {route_prefix}scalar/ {{
+    proxy_pass http://127.0.0.1:$PORT/scalar/;
+    proxy_http_version 1.1;
+    proxy_set_header Host \\$http_host;
+    proxy_set_header X-Real-IP \\$remote_addr;
+    proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \\$scheme;
+    proxy_set_header Upgrade \\$http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 90;
+}}
+
+location ^~ {route_prefix}openapi/ {{
+    proxy_pass http://127.0.0.1:$PORT/openapi/;
+    proxy_http_version 1.1;
+    proxy_set_header Host \\$http_host;
+    proxy_set_header X-Real-IP \\$remote_addr;
+    proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \\$scheme;
+}}
+
+location ^~ {route_prefix}swagger/ {{
+    proxy_pass http://127.0.0.1:$PORT/swagger/;
+    proxy_http_version 1.1;
+    proxy_set_header Host \\$http_host;
+    proxy_set_header X-Real-IP \\$remote_addr;
+    proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \\$scheme;
+}}
+
+location ^~ $ROUTE_PREFIX {{
+    alias $CLIENT_DIST/;
+    index index.html;
+    try_files \\$uri \\$uri/ $ROUTE_PREFIX/index.html;
+}}
+NGINX
+else
+  sudo tee "/etc/nginx/army-locations/$NGINX_NAME.conf" >/dev/null <<NGINX
 location = $ROUTE_CLEAN {{
     return 301 $ROUTE_PREFIX;
 }}
@@ -674,6 +768,7 @@ location ^~ $ROUTE_PREFIX {{
     proxy_read_timeout 90;
 }}
 NGINX
+fi
 
 sudo nginx -t
 sudo systemctl reload nginx
