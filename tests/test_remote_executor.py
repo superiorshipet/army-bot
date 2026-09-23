@@ -124,7 +124,8 @@ def test_node_site_script_contains_asset_normalization_and_prisma():
     }
     script = RemoteRecipeDeployExecutor._node_site_script(plan, server, "https://example.com/my-node-app/")
     assert "prisma db push" in script
-    assert "$ROUTE_PREFIX/images/" in script
+    assert "route_prefix = sys.argv[2]" in script
+    assert "images/" in script
 
 
 def test_static_site_script_contains_asset_normalization():
@@ -144,7 +145,37 @@ def test_static_site_script_contains_asset_normalization():
         "public_base_url": "https://example.com",
     }
     script = RemoteRecipeDeployExecutor._static_site_script(plan, server, "https://example.com/my-static-app/")
-    assert "$ROUTE_PREFIX/images/" in script
+    assert "route_prefix = sys.argv[2]" in script
+    assert "images/" in script
+
+
+def test_all_scripts_pass_bash_syntax_check():
+    import subprocess
+
+    server = {"base_path": "/var/www", "public_base_url": "https://example.com"}
+    plan = DeploymentPlan(
+        project_name="my-app",
+        repo_url="https://github.com/ex/my-app",
+        branch="main",
+        stack=ProjectStack.Node,
+        build_steps=[],
+        runtime="node",
+        notes=[],
+        app_path=".",
+        app_entry="index.html",
+    )
+    for func in [
+        RemoteRecipeDeployExecutor._static_site_script,
+        RemoteRecipeDeployExecutor._node_site_script,
+        RemoteRecipeDeployExecutor._python_site_script,
+        RemoteRecipeDeployExecutor._dotnet_site_script,
+        RemoteRecipeDeployExecutor._laravel_site_script,
+        RemoteRecipeDeployExecutor._universal_script,
+    ]:
+        script = func(plan, server, "https://example.com/my-app/")
+        p = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
+        assert p.returncode == 0, f"Bash syntax error in {func.__name__}:\n{p.stderr}"
+
 
 
 

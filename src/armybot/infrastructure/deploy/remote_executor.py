@@ -291,6 +291,10 @@ if [ -f package.json ]; then
     OUTPUT_DIR="$BUILD_DIR/build"
   elif [ -d "$BUILD_DIR/out" ]; then
     OUTPUT_DIR="$BUILD_DIR/out"
+  elif [ -d "$BUILD_DIR/.svelte-kit/output/client" ]; then
+    OUTPUT_DIR="$BUILD_DIR/.svelte-kit/output/client"
+  else
+    OUTPUT_DIR="$BUILD_DIR"
   fi
 else
   echo "[4/7] Static site has no build step"
@@ -301,17 +305,9 @@ else
   OUTPUT_DIR="$BUILD_DIR"
 fi
 
-if [ -d "$OUTPUT_DIR" ]; then
-  find "$OUTPUT_DIR" -type f \( -name "*.html" -o -name "*.js" -o -name "*.css" \) -exec sed -i \
-    -e "s|href=\"/favicon.ico\"|href=\"$ROUTE_PREFIX/favicon.ico\"|g" \
-    -e "s|href=\"/images/favicon.ico\"|href=\"$ROUTE_PREFIX/images/favicon.ico\"|g" \
-    -e "s|['\"]/images/|'$ROUTE_PREFIX/images/|g" \
-    -e "s|['\"]/assets/|'$ROUTE_PREFIX/assets/|g" \
-    -e "s|url(['\"]/images/|url('$ROUTE_PREFIX/images/|g" \
-    -e "s|url(/images/|url($ROUTE_PREFIX/images/|g" \
-    -e "s|url(['\"]/assets/|url('$ROUTE_PREFIX/assets/|g" \
-    -e "s|url(/assets/|url($ROUTE_PREFIX/assets/|g" \
-    {{}} + 2>/dev/null || true
+if [ -n "$OUTPUT_DIR" ] && [ -d "$OUTPUT_DIR" ]; then
+  TARGET_DIR="$OUTPUT_DIR"
+  {RemoteRecipeDeployExecutor._ASSET_NORMALIZER_INJECTOR}
 fi
 
 echo "[5/7] Writing nginx location include"
@@ -324,7 +320,7 @@ location = $ROUTE_CLEAN {{
 location ^~ $ROUTE_PREFIX {{
     alias $OUTPUT_DIR/;
     index index.html;
-    try_files \$uri \$uri/ $ROUTE_PREFIX/index.html;
+    try_files \\$uri \\$uri/ $ROUTE_PREFIX/index.html;
 }}
 NGINX
 
@@ -381,6 +377,83 @@ else:
             print('Injected basePath into ' + cfg)
         else:
             print('Warning: could not automatically inject basePath into ' + cfg)
+PYEOF"""
+
+    _ASSET_NORMALIZER_INJECTOR = r"""python3 - "$TARGET_DIR" "$ROUTE_PREFIX" << 'PYEOF' 2>/dev/null || true
+import sys, os
+
+target_dir = sys.argv[1]
+route_prefix = sys.argv[2].rstrip("/") + "/"
+
+if os.path.isdir(target_dir):
+    for root, _, files in os.walk(target_dir):
+        for f in files:
+            if f.endswith((".html", ".js", ".css", ".json")):
+                p = os.path.join(root, f)
+                try:
+                    with open(p, "r", encoding="utf-8", errors="ignore") as fh:
+                        content = fh.read()
+                    orig = content
+                    content = content.replace('"/images/', f'"{route_prefix}images/')
+                    content = content.replace("'/images/", f"'{route_prefix}images/")
+                    content = content.replace('url(/images/', f'url({route_prefix}images/')
+                    content = content.replace('url("/images/', f'url("{route_prefix}images/')
+                    content = content.replace("url('/images/", f"url('{route_prefix}images/")
+                    content = content.replace('"/assets/', f'"{route_prefix}assets/')
+                    content = content.replace("'/assets/", f"'{route_prefix}assets/")
+                    content = content.replace('url(/assets/', f'url({route_prefix}assets/')
+                    content = content.replace('url("/assets/', f'url("{route_prefix}assets/')
+                    content = content.replace("url('/assets/", f"url('{route_prefix}assets/")
+                    content = content.replace('href="/favicon.ico"', f'href="{route_prefix}favicon.ico"')
+                    content = content.replace('href="/images/favicon.ico"', f'href="{route_prefix}images/favicon.ico"')
+                    if f == "index.html":
+                        content = content.replace('href="/', 'href="./').replace('src="/', 'src="./')
+                    if content != orig:
+                        with open(p, "w", encoding="utf-8") as fh:
+                            fh.write(content)
+                except Exception:
+                    pass
+PYEOF"""
+
+    _CLIENT_ROUTER_INJECTOR = r"""python3 - "$CLIENT_DIR" "$ROUTE_CLEAN" "$ROUTE_PREFIX" << 'PYEOF' 2>/dev/null || true
+import sys, glob, re, os
+
+client_dir = sys.argv[1]
+route_clean = sys.argv[2]
+route_prefix = sys.argv[3]
+
+for f in glob.glob(f"{client_dir}/webpack*.*", recursive=True) + glob.glob(f"{client_dir}/webpack/**/*.*", recursive=True):
+    try:
+        with open(f, "r", encoding="utf-8") as fh:
+            content = fh.read()
+        if "publicPath: '/'" in content:
+            content = content.replace("publicPath: '/'", f"publicPath: '{route_prefix}'")
+            with open(f, "w", encoding="utf-8") as fh:
+                fh.write(content)
+    except Exception:
+        pass
+
+for f in glob.glob(f"{client_dir}/**/*.js", recursive=True) + glob.glob(f"{client_dir}/**/*.jsx", recursive=True) + glob.glob(f"{client_dir}/**/*.ts", recursive=True) + glob.glob(f"{client_dir}/**/*.tsx", recursive=True):
+    if "node_modules" in f or "dist" in f or "build" in f:
+        continue
+    try:
+        with open(f, "r", encoding="utf-8") as fh:
+            content = fh.read()
+        modified = False
+        if "createBrowserHistory(" in content and "basename:" in content:
+            content = re.sub(r"basename:\s*['\"][^'\"]*['\"]", f"basename: '{route_clean}'", content)
+            modified = True
+        if "createBrowserRouter(" in content and "basename" not in content:
+            content = content.replace("]);", f'], {{ basename: "{route_clean}" }});')
+            modified = True
+        if "<BrowserRouter" in content and "basename" not in content:
+            content = content.replace("<BrowserRouter", f'<BrowserRouter basename="{route_clean}"')
+            modified = True
+        if modified:
+            with open(f, "w", encoding="utf-8") as fh:
+                fh.write(content)
+    except Exception:
+        pass
 PYEOF"""
 
     @staticmethod
@@ -465,37 +538,7 @@ if [ -n "$CLIENT_DIR" ]; then
   echo "VITE_API_BASE_URL=$ROUTE_CLEAN" >> "$CLIENT_DIR/.env"
   echo "PUBLIC_URL=$ROUTE_PREFIX" >> "$CLIENT_DIR/.env"
 
-  python3 -c "
-import glob, re
-for f in glob.glob('$CLIENT_DIR/webpack*.*', recursive=True) + glob.glob('$CLIENT_DIR/webpack/**/*.*', recursive=True):
-    try:
-        content = open(f).read()
-        if \"publicPath: '/'\" in content:
-            content = content.replace(\"publicPath: '/'\", \"publicPath: '$ROUTE_PREFIX'\")
-            open(f, 'w').write(content)
-    except Exception:
-        pass
-
-for f in glob.glob('$CLIENT_DIR/**/*.js', recursive=True) + glob.glob('$CLIENT_DIR/**/*.jsx', recursive=True) + glob.glob('$CLIENT_DIR/**/*.ts', recursive=True) + glob.glob('$CLIENT_DIR/**/*.tsx', recursive=True):
-    if 'node_modules' in f or 'dist' in f or 'build' in f:
-        continue
-    try:
-        content = open(f).read()
-        modified = False
-        if 'createBrowserHistory(' in content and 'basename:' in content:
-            content = re.sub(r\"basename:\s*['\\\"][^'\\\"]*['\\\"]\", f\"basename: '$ROUTE_CLEAN'\", content)
-            modified = True
-        if 'createBrowserRouter(' in content and 'basename' not in content:
-            content = content.replace(']);', f'], {{{{ basename: \"$ROUTE_CLEAN\" }}}});')
-            modified = True
-        if '<BrowserRouter' in content and 'basename' not in content:
-            content = content.replace('<BrowserRouter', f'<BrowserRouter basename=\"$ROUTE_CLEAN\"')
-            modified = True
-        if modified:
-            open(f, 'w').write(content)
-    except Exception:
-        pass
-" 2>/dev/null || true
+  {RemoteRecipeDeployExecutor._CLIENT_ROUTER_INJECTOR}
 
   API_URL="$ROUTE_CLEAN/api" REACT_APP_API_URL="$ROUTE_CLEAN/api" PUBLIC_URL="$ROUTE_PREFIX" VITE_API_BASE_URL="$ROUTE_CLEAN" npm run build -- --base="$ROUTE_PREFIX" || npm run build || true
   cd "$BUILD_DIR"
@@ -518,9 +561,9 @@ elif [ -f dist/index.js ]; then
 elif [ -f build/index.js ]; then
   START_CMD="node build/index.js"
 else
-  MAIN_ENTRY=\$(python3 -c "import json; print(json.load(open('package.json')).get('main', ''))" 2>/dev/null || true)
-  if [ -n "\$MAIN_ENTRY" ] && [ -f "\$MAIN_ENTRY" ]; then
-    START_CMD="node \$MAIN_ENTRY"
+  MAIN_ENTRY=$(python3 -c "import json; print(json.load(open('package.json')).get('main', ''))" 2>/dev/null || true)
+  if [ -n "$MAIN_ENTRY" ] && [ -f "$MAIN_ENTRY" ]; then
+    START_CMD="node $MAIN_ENTRY"
   else
     START_CMD="npm start"
   fi
@@ -565,17 +608,8 @@ if [ -n "$CLIENT_DIR" ]; then
 fi
 
 if [ -n "$CLIENT_DIST" ] && [ -d "$CLIENT_DIST" ]; then
-  find "$CLIENT_DIST" -name "index.html" -exec sed -i 's|href="/|href="./|g; s|src="/|src="./|g' {{}} + 2>/dev/null || true
-  find "$CLIENT_DIST" -type f \( -name "*.html" -o -name "*.js" -o -name "*.css" -o -name "*.json" \) -exec sed -i \
-    -e "s|['\"]/images/|'$ROUTE_PREFIX/images/|g" \
-    -e "s|['\"]/assets/|'$ROUTE_PREFIX/assets/|g" \
-    -e "s|url(['\"]/images/|url('$ROUTE_PREFIX/images/|g" \
-    -e "s|url(/images/|url($ROUTE_PREFIX/images/|g" \
-    -e "s|url(['\"]/assets/|url('$ROUTE_PREFIX/assets/|g" \
-    -e "s|url(/assets/|url($ROUTE_PREFIX/assets/|g" \
-    -e "s|href=\"/favicon.ico\"|href=\"$ROUTE_PREFIX/favicon.ico\"|g" \
-    -e "s|href=\"/images/favicon.ico\"|href=\"$ROUTE_PREFIX/images/favicon.ico\"|g" \
-    {{}} + 2>/dev/null || true
+  TARGET_DIR="$CLIENT_DIST"
+  {RemoteRecipeDeployExecutor._ASSET_NORMALIZER_INJECTOR}
 fi
 
 if [ "$IS_NEXT" = "true" ]; then
@@ -727,44 +761,50 @@ elif [ -f app.py ] && grep -qi "fastapi\\|uvicorn" app.py 2>/dev/null; then
 elif [ -f manage.py ]; then
   .venv/bin/pip install gunicorn
 
-  python3 -c "
-import glob, re
+  python3 - "$ROUTE_CLEAN" "$ROUTE_PREFIX" << 'PYEOF' 2>/dev/null || true
+import sys, glob, re
+
+route_clean = sys.argv[1]
+route_prefix = sys.argv[2]
+
 for f in glob.glob('**/settings*.py', recursive=True) + glob.glob('**/settings/*.py', recursive=True):
     try:
-        content = open(f).read()
+        with open(f, 'r', encoding='utf-8') as fh:
+            content = fh.read()
         modified = False
         if 'ALLOWED_HOSTS' in content:
-            new_content = re.sub(r'ALLOWED_HOSTS\s*=\s*\[[^\]]*\]', 'ALLOWED_HOSTS = [\"*\"]', content)
+            new_content = re.sub(r'ALLOWED_HOSTS\\s*=\\s*\\[[^\\]]*\\]', 'ALLOWED_HOSTS = ["*"]', content)
             if new_content != content:
                 content = new_content
                 modified = True
         if 'allauth' in content and 'allauth.account.middleware.AccountMiddleware' not in content:
             if 'MIDDLEWARE = [' in content:
-                content = content.replace('MIDDLEWARE = [', 'MIDDLEWARE = [\n    \"allauth.account.middleware.AccountMiddleware\",')
+                content = content.replace('MIDDLEWARE = [', 'MIDDLEWARE = [\n    "allauth.account.middleware.AccountMiddleware",')
                 modified = True
         if modified:
-            open(f, 'w').write(content)
+            with open(f, 'w', encoding='utf-8') as fh:
+                fh.write(content)
     except Exception:
         pass
-" 2>/dev/null || true
+PYEOF
 
-  MAIN_SETTINGS=\$(find . -maxdepth 3 \( -name "settings.py" -o -name "base.py" \) 2>/dev/null | head -n 1 || true)
-  if [ -n "\$MAIN_SETTINGS" ] && [ -f "\$MAIN_SETTINGS" ]; then
-    if ! grep -q "FORCE_SCRIPT_NAME" "\$MAIN_SETTINGS" 2>/dev/null; then
-      printf '\nFORCE_SCRIPT_NAME = "%s"\nSTATIC_URL = "%sstatic/"\nALLOWED_HOSTS = ["*"]\n' "$ROUTE_CLEAN" "$ROUTE_PREFIX" >> "\$MAIN_SETTINGS"
+  MAIN_SETTINGS=$(find . -maxdepth 3 \\( -name "settings.py" -o -name "base.py" \\) 2>/dev/null | head -n 1 || true)
+  if [ -n "$MAIN_SETTINGS" ] && [ -f "$MAIN_SETTINGS" ]; then
+    if ! grep -q "FORCE_SCRIPT_NAME" "$MAIN_SETTINGS" 2>/dev/null; then
+      printf '\nFORCE_SCRIPT_NAME = "%s"\nSTATIC_URL = "%sstatic/"\nALLOWED_HOSTS = ["*"]\n' "$ROUTE_CLEAN" "$ROUTE_PREFIX" >> "$MAIN_SETTINGS"
     fi
   fi
 
-  DJANGO_SETTINGS=\$(grep -ro "DJANGO_SETTINGS_MODULE', '.*'" manage.py 2>/dev/null | head -n 1 | cut -d"'" -f4 || echo "")
+  DJANGO_SETTINGS=$(grep -ro "DJANGO_SETTINGS_MODULE', '.*'" manage.py 2>/dev/null | head -n 1 | cut -d"'" -f4 || echo "")
 
   .venv/bin/python manage.py migrate --noinput || true
   .venv/bin/python manage.py collectstatic --noinput || true
 
-  WSGI_APP=\$(grep -ro "WSGI_APPLICATION = '.*'" . 2>/dev/null | head -n 1 | cut -d"'" -f2 || echo "wsgi:application")
-  if [ -n "\$DJANGO_SETTINGS" ]; then
-    START_CMD=".venv/bin/gunicorn \$WSGI_APP --bind 127.0.0.1:\$PORT --env DJANGO_SETTINGS_MODULE=\$DJANGO_SETTINGS"
+  WSGI_APP=$(grep -ro "WSGI_APPLICATION = '.*'" . 2>/dev/null | head -n 1 | cut -d"'" -f2 || echo "wsgi:application")
+  if [ -n "$DJANGO_SETTINGS" ]; then
+    START_CMD=".venv/bin/gunicorn $WSGI_APP --bind 127.0.0.1:$PORT --env DJANGO_SETTINGS_MODULE=$DJANGO_SETTINGS"
   else
-    START_CMD=".venv/bin/gunicorn \$WSGI_APP --bind 127.0.0.1:\$PORT"
+    START_CMD=".venv/bin/gunicorn $WSGI_APP --bind 127.0.0.1:$PORT"
   fi
 elif [ -f main.py ]; then
   START_CMD=".venv/bin/python main.py"
@@ -786,18 +826,22 @@ if [ -n "$CLIENT_DIR" ]; then
   echo "Building frontend client in $CLIENT_DIR..."
   cd "$CLIENT_DIR"
   npm install
-  python3 -c "
-import glob
-for f in glob.glob('$CLIENT_DIR/src/**/router*.*', recursive=True):
+  python3 - "$ROUTE_PREFIX" << 'PYEOF' 2>/dev/null || true
+import sys, glob
+
+route_prefix = sys.argv[1]
+for f in glob.glob('src/**/router*.*', recursive=True):
     try:
-        content = open(f).read()
+        with open(f, 'r', encoding='utf-8') as fh:
+            content = fh.read()
         if 'createBrowserRouter(' in content and 'basename' not in content:
-            new_content = content.replace(']);', '], {{{{ basename: import.meta.env.BASE_URL }}}});')
+            new_content = content.replace(']);', '], {{ basename: import.meta.env.BASE_URL }});')
             if new_content != content:
-                open(f, 'w').write(new_content)
+                with open(f, 'w', encoding='utf-8') as fh:
+                    fh.write(new_content)
     except Exception:
         pass
-" 2>/dev/null || true
+PYEOF
   VITE_API_BASE_URL="$ROUTE_CLEAN" npm run build -- --base="$ROUTE_PREFIX" || npm run build || true
   cd "$BUILD_DIR"
 fi
@@ -840,17 +884,8 @@ if [ -n "$CLIENT_DIR" ]; then
 fi
 
 if [ -n "$CLIENT_DIST" ] && [ -d "$CLIENT_DIST" ]; then
-  find "$CLIENT_DIST" -name "index.html" -exec sed -i 's|href="/|href="./|g; s|src="/|src="./|g' {{}} + 2>/dev/null || true
-  find "$CLIENT_DIST" -type f \( -name "*.html" -o -name "*.js" -o -name "*.css" -o -name "*.json" \) -exec sed -i \
-    -e "s|['\"]/images/|'$ROUTE_PREFIX/images/|g" \
-    -e "s|['\"]/assets/|'$ROUTE_PREFIX/assets/|g" \
-    -e "s|url(['\"]/images/|url('$ROUTE_PREFIX/images/|g" \
-    -e "s|url(/images/|url($ROUTE_PREFIX/images/|g" \
-    -e "s|url(['\"]/assets/|url('$ROUTE_PREFIX/assets/|g" \
-    -e "s|url(/assets/|url($ROUTE_PREFIX/assets/|g" \
-    -e "s|href=\"/favicon.ico\"|href=\"$ROUTE_PREFIX/favicon.ico\"|g" \
-    -e "s|href=\"/images/favicon.ico\"|href=\"$ROUTE_PREFIX/images/favicon.ico\"|g" \
-    {{}} + 2>/dev/null || true
+  TARGET_DIR="$CLIENT_DIST"
+  {RemoteRecipeDeployExecutor._ASSET_NORMALIZER_INJECTOR}
 fi
 
 if [ -n "$CLIENT_DIST" ]; then
@@ -905,7 +940,7 @@ location ^~ {route_prefix}static/ {{
 "
   fi
   if [ -d "$BUILD_DIR/media_root" ]; then
-    STATIC_CONF="\$STATIC_CONF
+    STATIC_CONF="$STATIC_CONF
 location ^~ {route_prefix}media/ {{
     alias $BUILD_DIR/media_root/;
 }}
@@ -916,7 +951,7 @@ location ^~ {route_prefix}media/ {{
 location = $ROUTE_CLEAN {{
     return 301 $ROUTE_PREFIX;
 }}
-\$STATIC_CONF
+$STATIC_CONF
 location ^~ $ROUTE_PREFIX {{
     proxy_pass http://127.0.0.1:$PORT/;
     proxy_redirect ~^http://[^/]+/(.*) $ROUTE_PREFIX\\$1;
@@ -997,7 +1032,7 @@ except Exception:
   fi
 fi
 
-WEB_CSPROJ=$(find . -maxdepth 3 \( -name "*WebApp*.csproj" -o -name "*Web*.csproj" -o -name "*Api*.csproj" \) 2>/dev/null | head -n 1 || true)
+WEB_CSPROJ=$(find . -maxdepth 3 \\( -name "*WebApp*.csproj" -o -name "*Web*.csproj" -o -name "*Api*.csproj" \\) 2>/dev/null | head -n 1 || true)
 if [ -n "$WEB_CSPROJ" ] && [ -f "$WEB_CSPROJ" ]; then
   echo "Targeting web project: $WEB_CSPROJ"
   dotnet restore "$WEB_CSPROJ" || dotnet restore || true
@@ -1087,17 +1122,8 @@ if [ -n "$CLIENT_DIR" ]; then
 fi
 
 if [ -n "$CLIENT_DIST" ] && [ -d "$CLIENT_DIST" ]; then
-  find "$CLIENT_DIST" -name "index.html" -exec sed -i 's|href="/|href="./|g; s|src="/|src="./|g' {{}} + 2>/dev/null || true
-  find "$CLIENT_DIST" -type f \( -name "*.html" -o -name "*.js" -o -name "*.css" -o -name "*.json" \) -exec sed -i \
-    -e "s|['\"]/images/|'$ROUTE_PREFIX/images/|g" \
-    -e "s|['\"]/assets/|'$ROUTE_PREFIX/assets/|g" \
-    -e "s|url(['\"]/images/|url('$ROUTE_PREFIX/images/|g" \
-    -e "s|url(/images/|url($ROUTE_PREFIX/images/|g" \
-    -e "s|url(['\"]/assets/|url('$ROUTE_PREFIX/assets/|g" \
-    -e "s|url(/assets/|url($ROUTE_PREFIX/assets/|g" \
-    -e "s|href=\"/favicon.ico\"|href=\"$ROUTE_PREFIX/favicon.ico\"|g" \
-    -e "s|href=\"/images/favicon.ico\"|href=\"$ROUTE_PREFIX/images/favicon.ico\"|g" \
-    {{}} + 2>/dev/null || true
+  TARGET_DIR="$CLIENT_DIST"
+  {RemoteRecipeDeployExecutor._ASSET_NORMALIZER_INJECTOR}
 fi
 
 if [ -n "$CLIENT_DIST" ]; then
