@@ -392,6 +392,7 @@ After=network.target
 Type=simple
 User=$USER
 WorkingDirectory=$BUILD_DIR
+EnvironmentFile=-$APP_DIR/.env
 Environment=PORT=$PORT
 Environment=NODE_ENV=production
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:$BUILD_DIR/node_modules/.bin
@@ -539,6 +540,7 @@ After=network.target
 Type=simple
 User=$USER
 WorkingDirectory=$BUILD_DIR
+EnvironmentFile=-$APP_DIR/.env
 Environment=PORT=$PORT
 Environment=PYTHONUNBUFFERED=1
 ExecStart=$BUILD_DIR/$START_CMD
@@ -668,6 +670,7 @@ After=network.target
 Type=simple
 User=$USER
 WorkingDirectory=$PUBLISH_DIR
+EnvironmentFile=-$APP_DIR/.env
 Environment=ASPNETCORE_ENVIRONMENT=Development
 Environment=ASPNETCORE_URLS=http://127.0.0.1:$PORT
 ExecStart=/usr/bin/dotnet $DLL_FILE --urls "http://127.0.0.1:$PORT"
