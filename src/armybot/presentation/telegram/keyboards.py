@@ -1,5 +1,8 @@
+from uuid import UUID
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
+from armybot.domain.entities import Project
 from armybot.domain.enums import CredentialProvider
 
 
@@ -94,3 +97,37 @@ def provider_label(provider: CredentialProvider) -> str:
         CredentialProvider.Server: "Server",
     }
     return labels[provider]
+
+
+def projects_list_keyboard(projects: list[Project]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for project in projects:
+        rows.append([
+            InlineKeyboardButton(text=f"📦 {project.name}", callback_data=f"project:view:{project.id}"),
+            InlineKeyboardButton(text="🗑️ Delete", callback_data=f"project:del_prompt:{project.id}"),
+        ])
+    rows.append([InlineKeyboardButton(text="Back to menu", callback_data="menu:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def project_details_keyboard(project: Project) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    actions: list[InlineKeyboardButton] = []
+    if project.live_url:
+        actions.append(InlineKeyboardButton(text="🌐 Open Site", url=project.live_url))
+    actions.append(InlineKeyboardButton(text="🗑️ Delete Project", callback_data=f"project:del_prompt:{project.id}"))
+    rows.append(actions)
+    rows.append([InlineKeyboardButton(text="⬅️ Back to Projects", callback_data="menu:projects")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def project_delete_confirm_keyboard(project_id: UUID | str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Yes, Delete Project", callback_data=f"project:del_confirm:{project_id}"),
+                InlineKeyboardButton(text="❌ Cancel", callback_data=f"project:del_cancel:{project_id}"),
+            ]
+        ]
+    )
+

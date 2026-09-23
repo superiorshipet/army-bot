@@ -161,6 +161,19 @@ class SqlProjectRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
+    async def get_by_id(self, project_id: UUID) -> Project | None:
+        model = await self.session.get(ProjectModel, project_id)
+        return to_project(model) if model else None
+
+    async def get_by_name(self, user_id: UUID, name: str) -> Project | None:
+        model = await self.session.scalar(
+            select(ProjectModel).where(
+                ProjectModel.user_id == user_id,
+                ProjectModel.name == name,
+            )
+        )
+        return to_project(model) if model else None
+
     async def get_by_repo(self, user_id: UUID, repo_url: str, branch: str) -> Project | None:
         model = await self.session.scalar(
             select(ProjectModel).where(
@@ -193,6 +206,12 @@ class SqlProjectRepository:
         model.stack = project.stack
         model.live_url = project.live_url
         await self.session.flush()
+
+    async def delete(self, project_id: UUID) -> None:
+        model = await self.session.get(ProjectModel, project_id)
+        if model:
+            await self.session.delete(model)
+            await self.session.flush()
 
     async def list_for_user(self, user_id: UUID) -> list[Project]:
         rows = await self.session.scalars(select(ProjectModel).where(ProjectModel.user_id == user_id))

@@ -72,6 +72,69 @@ class RemoteRecipeDeployExecutor:
         await self._log(on_log, "✅ Deployment recipe finished.")
         return live_url, logs
 
+    async def cleanup_project(
+        self,
+        project_name: str,
+        credentials: dict[str, dict],
+        on_log: LogCallback = None,
+    ) -> list[str]:
+        server = credentials.get("server", {})
+        if not server:
+            raise ValueError("Server credentials are required to delete a project.")
+
+        safe_name = self._safe_name(project_name)
+        if not safe_name or safe_name in {"", "/", ".", "..", "var", "www", "etc", "home"}:
+            raise ValueError(f"Invalid project name for deletion: {project_name!r}")
+
+        base_path = server.get("base_path", "/var/www").rstrip("/")
+        app_dir = f"{base_path}/{safe_name}"
+        service_name = f"army-{safe_name}"
+        nginx_name = f"army-{safe_name}"
+
+        script = f"""#!/usr/bin/env bash
+set -x
+
+echo "[1/4] Stopping and removing systemd service..."
+sudo systemctl stop "{service_name}.service" 2>/dev/null || true
+sudo systemctl disable "{service_name}.service" 2>/dev/null || true
+sudo rm -f "/etc/systemd/system/{service_name}.service"
+sudo systemctl daemon-reload
+
+echo "[2/4] Removing nginx configuration..."
+sudo rm -f "/etc/nginx/army-locations/{nginx_name}.conf"
+sudo nginx -t 2>/dev/null && sudo systemctl reload nginx 2>/dev/null || true
+
+echo "[3/4] Removing project files..."
+if [ -d "{app_dir}" ] && [ "{app_dir}" != "/var/www" ] && [ "{app_dir}" != "/" ]; then
+  sudo rm -rf "{app_dir}"
+fi
+rm -f "/tmp/army-recipe-{safe_name}.sh" "/tmp/army-recipe-del-{safe_name}.sh"
+
+echo "[4/4] Project {safe_name} completely removed from server."
+"""
+        command = self._remote_script_command(f"del-{safe_name}", script)
+        ssh = SSHClient(command_timeout=120)
+        try:
+            await self._log(on_log, f"🔌 Connecting to server to remove {safe_name}...")
+            await ssh.connect(
+                host=server["host"],
+                username=server["user"],
+                key_path=server["ssh_key_path"],
+            )
+            await self._log(on_log, f"🗑️ Deleting files and services for {safe_name}...")
+            stdout, stderr, exit_code = await ssh.run(command)
+        finally:
+            await ssh.close()
+
+        output = self._summarise_output(stdout, stderr, exit_code)
+        logs = [
+            f"Cleanup requested for {safe_name}",
+            output,
+        ]
+        if exit_code != 0:
+            raise RuntimeError(f"Cleanup failed with exit code {exit_code}. {output}")
+        return logs
+
     @staticmethod
     def _common_git_prep(project: str, repo_url: str, branch: str, base_path: str, app_path: str) -> str:
         return f"""

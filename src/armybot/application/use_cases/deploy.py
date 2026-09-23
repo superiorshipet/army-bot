@@ -72,3 +72,41 @@ class DeployProjectService:
 
         await self.deployments.update(deployment)
         return deployment
+
+    async def delete_project(
+        self,
+        user: User,
+        project_id_or_name: str,
+        on_log: LogCallback = None,
+    ) -> tuple[bool, str]:
+        project: Project | None = None
+        try:
+            from uuid import UUID
+            proj_uuid = UUID(project_id_or_name)
+            project = await self.projects.get_by_id(proj_uuid)
+        except (ValueError, TypeError):
+            pass
+
+        if not project:
+            project = await self.projects.get_by_name(user.id, project_id_or_name)
+
+        if not project:
+            return False, f"Project '{project_id_or_name}' not found."
+
+        if project.user_id != user.id and not user.is_super_admin:
+            return False, "You do not have permission to delete this project."
+
+        try:
+            secrets = await self.credentials.load_all(user)
+            if hasattr(self.executor, "cleanup_project"):
+                await self.executor.cleanup_project(project.name, secrets, on_log)
+            else:
+                from armybot.infrastructure.deploy.remote_executor import RemoteRecipeDeployExecutor
+                executor = RemoteRecipeDeployExecutor()
+                await executor.cleanup_project(project.name, secrets, on_log)
+        except Exception as exc:
+            if on_log:
+                await on_log(f"⚠️ Remote cleanup warning: {exc}")
+
+        await self.projects.delete(project.id)
+        return True, f"Project '{project.name}' deleted successfully."

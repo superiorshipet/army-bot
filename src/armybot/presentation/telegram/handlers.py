@@ -2,7 +2,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from armybot.domain.enums import CredentialProvider
 from armybot.infrastructure.telegram.container import container_scope
@@ -17,6 +17,9 @@ from armybot.presentation.telegram.keyboards import (
     admin_panel_keyboard,
     deploy_prompt_keyboard,
     main_menu_keyboard,
+    project_delete_confirm_keyboard,
+    project_details_keyboard,
+    projects_list_keyboard,
     provider_label,
     setup_keyboard,
     start_reply_keyboard,
@@ -114,9 +117,23 @@ async def reply_deploy(message: Message, state: FSMContext) -> None:
 async def reply_projects(message: Message) -> None:
     if not message.from_user:
         return
+    async with container_scope() as c:
+        user = await c.access.require_active(message.from_user.id)
+        rows = await c.projects.list_for_user(user.id)
+    if not rows:
+        await message.answer(
+            "No projects yet. Use Deploy project from the menu.",
+            reply_markup=start_reply_keyboard(user.is_super_admin),
+        )
+        return
+    text = "📦 <b>Your Projects:</b>\n\n" + "\n".join(
+        f"• <b>{project.name}</b> ({project.stack.value})\n  🔗 {project.live_url or 'No live URL'}"
+        for project in rows
+    )
     await message.answer(
-        await _projects_text(message.from_user.id),
-        reply_markup=start_reply_keyboard(await _is_admin(message.from_user.id)),
+        text,
+        reply_markup=projects_list_keyboard(rows),
+        parse_mode="HTML",
     )
 
 
@@ -217,8 +234,24 @@ async def menu_deploy(callback: CallbackQuery, state: FSMContext) -> None:
 async def menu_projects(callback: CallbackQuery) -> None:
     if not callback.from_user:
         return
-    text = await _projects_text(callback.from_user.id)
-    await callback.message.edit_text(text, reply_markup=await _main_menu_for(callback.from_user.id))
+    async with container_scope() as c:
+        user = await c.access.require_active(callback.from_user.id)
+        rows = await c.projects.list_for_user(user.id)
+    if not rows:
+        await callback.message.edit_text(
+            "No projects yet. Use Deploy project from the menu.",
+            reply_markup=await _main_menu_for(callback.from_user.id),
+        )
+    else:
+        text = "📦 <b>Your Projects:</b>\n\n" + "\n".join(
+            f"• <b>{project.name}</b> ({project.stack.value})\n  🔗 {project.live_url or 'No live URL'}"
+            for project in rows
+        )
+        await callback.message.edit_text(
+            text,
+            reply_markup=projects_list_keyboard(rows),
+            parse_mode="HTML",
+        )
     await callback.answer()
 
 
@@ -513,20 +546,191 @@ async def deploy(message: Message) -> None:
 
 @router.message(Command("projects"))
 async def projects(message: Message) -> None:
+    await reply_projects(message)
+
+
+@router.message(Command("delete", "delete_project"))
+async def command_delete_project(message: Message) -> None:
     if not message.from_user:
         return
+    text = (message.text or "").strip()
+    parts = text.split(maxsplit=1)
     async with container_scope() as c:
         user = await c.access.require_active(message.from_user.id)
         rows = await c.projects.list_for_user(user.id)
+
     if not rows:
-        await message.answer("No projects yet. Use /deploy <repo_url_or_path>.")
+        await message.answer("No projects available to delete.")
         return
+
+    if len(parts) > 1:
+        target_name = parts[1].strip()
+        matched = next((p for p in rows if p.name.lower() == target_name.lower()), None)
+        if matched:
+            confirm_text = (
+                f"⚠️ <b>Delete Project Confirmation</b>\n\n"
+                f"Are you sure you want to permanently delete <b>{matched.name}</b>?\n\n"
+                f"This will:\n"
+                f"• Stop and disable its systemd service (<code>army-{matched.name}</code>)\n"
+                f"• Remove its Nginx configuration\n"
+                f"• Delete its files from the server\n"
+                f"• Delete all its deployment records\n\n"
+                f"<i>This action cannot be undone!</i>"
+            )
+            await message.answer(
+                confirm_text,
+                reply_markup=project_delete_confirm_keyboard(matched.id),
+                parse_mode="HTML",
+            )
+            return
+        await message.answer(f"Project '{target_name}' not found. Please choose from your projects below:")
+
     await message.answer(
-        "\n".join(
-            f"- {project.name} | {project.stack.value} | {project.live_url or 'no live url yet'}"
-            for project in rows
-        )
+        "Select a project to delete:",
+        reply_markup=projects_list_keyboard(rows),
     )
+
+
+@router.callback_query(F.data.startswith("project:view:"))
+async def project_view(callback: CallbackQuery) -> None:
+    if not callback.from_user:
+        return
+    proj_id_str = callback.data.split(":", 2)[2]
+    async with container_scope() as c:
+        user = await c.access.require_active(callback.from_user.id)
+        try:
+            from uuid import UUID
+            proj_id = UUID(proj_id_str)
+            project = await c.projects.get_by_id(proj_id)
+        except Exception:
+            project = None
+
+    if not project:
+        await callback.answer("Project not found.", show_alert=True)
+        return
+
+    text = (
+        f"📦 <b>Project Details:</b>\n\n"
+        f"<b>Name:</b> {project.name}\n"
+        f"<b>Stack:</b> {project.stack.value}\n"
+        f"<b>Branch:</b> {project.branch}\n"
+        f"<b>Repo:</b> {project.repo_url}\n"
+        f"<b>Live URL:</b> {project.live_url or 'None'}\n"
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=project_details_keyboard(project),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("project:del_prompt:"))
+async def project_delete_prompt(callback: CallbackQuery) -> None:
+    if not callback.from_user:
+        return
+    proj_id_str = callback.data.split(":", 2)[2]
+    async with container_scope() as c:
+        user = await c.access.require_active(callback.from_user.id)
+        try:
+            from uuid import UUID
+            proj_id = UUID(proj_id_str)
+            project = await c.projects.get_by_id(proj_id)
+        except Exception:
+            project = None
+
+    if not project:
+        await callback.answer("Project not found.", show_alert=True)
+        return
+
+    text = (
+        f"⚠️ <b>Delete Project Confirmation</b>\n\n"
+        f"Are you sure you want to permanently delete <b>{project.name}</b>?\n\n"
+        f"This will:\n"
+        f"• Stop and disable systemd service (<code>army-{project.name}</code>)\n"
+        f"• Remove Nginx configuration\n"
+        f"• Delete project files from <code>/var/www/{project.name}</code>\n"
+        f"• Remove all deployment records\n\n"
+        f"<i>This action cannot be undone!</i>"
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=project_delete_confirm_keyboard(project.id),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("project:del_cancel:"))
+async def project_delete_cancel(callback: CallbackQuery) -> None:
+    if not callback.from_user:
+        return
+    proj_id_str = callback.data.split(":", 2)[2]
+    async with container_scope() as c:
+        user = await c.access.require_active(callback.from_user.id)
+        try:
+            from uuid import UUID
+            proj_id = UUID(proj_id_str)
+            project = await c.projects.get_by_id(proj_id)
+        except Exception:
+            project = None
+
+    if project:
+        text = (
+            f"📦 <b>Project Details:</b>\n\n"
+            f"<b>Name:</b> {project.name}\n"
+            f"<b>Stack:</b> {project.stack.value}\n"
+            f"<b>Branch:</b> {project.branch}\n"
+            f"<b>Repo:</b> {project.repo_url}\n"
+            f"<b>Live URL:</b> {project.live_url or 'None'}\n"
+        )
+        await callback.message.edit_text(
+            text,
+            reply_markup=project_details_keyboard(project),
+            parse_mode="HTML",
+        )
+    else:
+        await menu_projects(callback)
+    await callback.answer("Deletion cancelled.")
+
+
+@router.callback_query(F.data.startswith("project:del_confirm:"))
+async def project_delete_confirm(callback: CallbackQuery) -> None:
+    if not callback.from_user:
+        return
+    proj_id_str = callback.data.split(":", 2)[2]
+    await callback.message.edit_text(
+        "⏳ <b>Deleting project...</b>\nStopping services, removing Nginx config, and cleaning up server files...",
+        parse_mode="HTML",
+    )
+
+    async def _cleanup_log(text: str) -> None:
+        try:
+            await callback.message.edit_text(f"⏳ <b>Deleting project...</b>\n\n{text}", parse_mode="HTML")
+        except Exception:
+            pass
+
+    async with container_scope() as c:
+        user = await c.access.require_active(callback.from_user.id)
+        success, msg = await c.deploy.delete_project(user, proj_id_str, on_log=_cleanup_log)
+
+    if success:
+        await callback.message.edit_text(
+            f"✅ <b>{msg}</b>\n\nAll server resources and database records have been completely removed.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Back to Projects", callback_data="menu:projects")]]
+            ),
+            parse_mode="HTML",
+        )
+    else:
+        await callback.message.edit_text(
+            f"❌ <b>Deletion failed:</b>\n{msg}",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Back to Projects", callback_data="menu:projects")]]
+            ),
+            parse_mode="HTML",
+        )
+    await callback.answer()
 
 
 @router.message(Command("status"))

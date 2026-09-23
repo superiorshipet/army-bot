@@ -249,6 +249,19 @@ class SqliteProjectRepository:
     def __init__(self, store: SqliteStore) -> None:
         self.store = store
 
+    async def get_by_id(self, project_id: UUID) -> Project | None:
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT * FROM projects WHERE id=?", (str(project_id),)).fetchone()
+        return _row_to_project(row) if row else None
+
+    async def get_by_name(self, user_id: UUID, name: str) -> Project | None:
+        with self.store._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM projects WHERE user_id=? AND name=?",
+                (str(user_id), name),
+            ).fetchone()
+        return _row_to_project(row) if row else None
+
     async def get_by_repo(self, user_id: UUID, repo_url: str, branch: str) -> Project | None:
         with self.store._connect() as conn:
             row = conn.execute(
@@ -283,6 +296,11 @@ class SqliteProjectRepository:
                 "UPDATE projects SET name=?, stack=?, live_url=? WHERE id=?",
                 (project.name, project.stack.value, project.live_url, str(project.id)),
             )
+
+    async def delete(self, project_id: UUID) -> None:
+        with self.store._connect() as conn:
+            conn.execute("DELETE FROM deployments WHERE project_id=?", (str(project_id),))
+            conn.execute("DELETE FROM projects WHERE id=?", (str(project_id),))
 
     async def list_for_user(self, user_id: UUID) -> list[Project]:
         with self.store._connect() as conn:
