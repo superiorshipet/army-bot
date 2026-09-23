@@ -221,6 +221,28 @@ if grep -rqi "redis" "$APP_DIR" --exclude-dir=".git" --exclude-dir="node_modules
     echo "REDIS_URL=localhost:6379" >> "$APP_DIR/.env"
   fi
 fi
+
+# Auto-inject MongoDB URI if mongodb is referenced
+if grep -rqi "mongodb\\|mongoose" "$APP_DIR" --exclude-dir=".git" --exclude-dir="node_modules" 2>/dev/null; then
+  if ! grep -q "^MONGO_URI=" "$APP_DIR/.env" 2>/dev/null; then
+    echo "MONGO_URI=mongodb://127.0.0.1:27017/$DB_ROLE" >> "$APP_DIR/.env"
+  fi
+  if ! grep -q "^MONGODB_URI=" "$APP_DIR/.env" 2>/dev/null; then
+    echo "MONGODB_URI=mongodb://127.0.0.1:27017/$DB_ROLE" >> "$APP_DIR/.env"
+  fi
+fi
+
+# Auto-inject JWT_SECRET if referenced or empty
+if grep -rqi "JWT_SECRET" "$APP_DIR" --exclude-dir=".git" --exclude-dir="node_modules" 2>/dev/null; then
+  if ! grep -q "^JWT_SECRET=[a-zA-Z0-9]" "$APP_DIR/.env" 2>/dev/null; then
+    sed -i '/^JWT_SECRET=/d' "$APP_DIR/.env" 2>/dev/null || true
+    echo "JWT_SECRET=$(openssl rand -hex 32)" >> "$APP_DIR/.env"
+  fi
+fi
+
+if [ -d "$APP_DIR/server" ] && [ -f "$APP_DIR/.env" ]; then
+  cp "$APP_DIR/.env" "$APP_DIR/server/.env" 2>/dev/null || true
+fi
 """
 
     @staticmethod
@@ -402,10 +424,40 @@ if grep -q '"build"' package.json 2>/dev/null; then
   npm run build || true
 fi
 
+CLIENT_DIR=""
+for candidate in "$APP_DIR/src/client" "$APP_DIR/client" "$APP_DIR/src/frontend" "$APP_DIR/frontend" "$APP_DIR/ui"; do
+  if [ -f "$candidate/package.json" ]; then
+    CLIENT_DIR="$candidate"
+    break
+  fi
+done
+
+if [ -n "$CLIENT_DIR" ]; then
+  echo "Building frontend client in $CLIENT_DIR..."
+  cd "$CLIENT_DIR"
+  npm install
+  python3 -c "
+import glob
+for f in glob.glob('$CLIENT_DIR/src/**/router*.*', recursive=True):
+    try:
+        content = open(f).read()
+        if 'createBrowserRouter(' in content and 'basename' not in content:
+            new_content = content.replace(']);', '], {{{{ basename: import.meta.env.BASE_URL }}}});')
+            if new_content != content:
+                open(f, 'w').write(new_content)
+    except Exception:
+        pass
+" 2>/dev/null || true
+  VITE_API_BASE_URL="$ROUTE_CLEAN" npm run build -- --base="$ROUTE_PREFIX" || npm run build || true
+  cd "$BUILD_DIR"
+fi
+
 # Detect entry/start command
 START_CMD=""
 if grep -q '"start"' package.json 2>/dev/null; then
   START_CMD="npm start"
+elif [ -f server/index.js ]; then
+  START_CMD="node server/index.js"
 elif [ -f server.js ]; then
   START_CMD="node server.js"
 elif [ -f app.js ]; then
@@ -417,7 +469,12 @@ elif [ -f dist/index.js ]; then
 elif [ -f build/index.js ]; then
   START_CMD="node build/index.js"
 else
-  START_CMD="npm start"
+  MAIN_ENTRY=\$(python3 -c "import json; print(json.load(open('package.json')).get('main', ''))" 2>/dev/null || true)
+  if [ -n "\$MAIN_ENTRY" ] && [ -f "\$MAIN_ENTRY" ]; then
+    START_CMD="node \$MAIN_ENTRY"
+  else
+    START_CMD="npm start"
+  fi
 fi
 
 echo "[5/7] Configuring systemd service"
@@ -474,35 +531,6 @@ location ^~ $ROUTE_PREFIX {{
     proxy_read_timeout 90;
 }}
 NGINX
-CLIENT_DIR=""
-if [ "$IS_NEXT" != "true" ]; then
-  for candidate in "$APP_DIR/src/client" "$APP_DIR/client" "$APP_DIR/src/frontend" "$APP_DIR/frontend" "$APP_DIR/ui"; do
-    if [ -f "$candidate/package.json" ]; then
-      CLIENT_DIR="$candidate"
-      break
-    fi
-  done
-
-  if [ -n "$CLIENT_DIR" ]; then
-    echo "Building frontend client in $CLIENT_DIR..."
-    cd "$CLIENT_DIR"
-    npm install
-    python3 -c "
-import glob
-for f in glob.glob('$CLIENT_DIR/src/**/router*.*', recursive=True):
-    try:
-        content = open(f).read()
-        if 'createBrowserRouter(' in content and 'basename' not in content:
-            new_content = content.replace(']);', '], {{{{ basename: import.meta.env.BASE_URL }}}});')
-            if new_content != content:
-                open(f, 'w').write(new_content)
-    except Exception:
-        pass
-" 2>/dev/null || true
-    VITE_API_BASE_URL="$ROUTE_CLEAN" npm run build -- --base="$ROUTE_PREFIX" || npm run build || true
-    cd "$BUILD_DIR"
-  fi
-fi
 
 CLIENT_DIST=""
 if [ -n "$CLIENT_DIR" ]; then
@@ -513,7 +541,7 @@ if [ -n "$CLIENT_DIR" ]; then
   fi
 fi
 
-if [ -n "$CLIENT_DIST" ]; then
+elif [ -n "$CLIENT_DIST" ]; then
 sudo tee "/etc/nginx/army-locations/$NGINX_NAME.conf" >/dev/null <<NGINX
 location = $ROUTE_CLEAN {{
     return 301 $ROUTE_PREFIX;
@@ -567,7 +595,6 @@ location ^~ $ROUTE_PREFIX {{
     proxy_read_timeout 90;
 }}
 NGINX
-fi
 fi
 
 sudo nginx -t
