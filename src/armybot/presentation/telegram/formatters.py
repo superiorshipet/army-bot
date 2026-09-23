@@ -1,3 +1,5 @@
+from html import escape
+
 from armybot.domain.entities import Deployment, User
 
 
@@ -16,3 +18,18 @@ def deployment_report(deployment: Deployment) -> str:
         f"{live}\n\n"
         f"Logs:\n{logs}"
     )
+
+
+def deployment_report_html(deployment: Deployment) -> str:
+    logs = "\n".join(f"- {escape(line)}" for line in deployment.logs[-8:])
+    live = f"\nLive: {escape(deployment.live_url)}" if deployment.live_url else ""
+    return (
+        f"Deployment <code>{escape(deployment.status.value)}</code>\n"
+        f"Branch: <code>{escape(deployment.branch)}</code>"
+        f"{live}\n\n"
+        f"Logs:\n{logs}"
+    )
+
+
+def deployment_error_html(error: Exception) -> str:
+    return f"❌ Deployment failed with error:\n\n<code>{escape(str(error))}</code>"

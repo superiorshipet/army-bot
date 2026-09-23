@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     execution_mode: str = "dry_run"
 
     ai_provider: str = "gemini"
+    ai_deploy_strategy: str = "recipe"
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3.8-flash"
     groq_api_key: str = ""

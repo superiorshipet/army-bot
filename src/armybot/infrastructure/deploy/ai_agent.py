@@ -211,6 +211,7 @@ class AIDeployAgent:
         self.model = model
         self.max_commands = max_commands
         self.command_timeout = command_timeout
+        self._busy_notice_sent = False
 
     async def deploy(
         self,
@@ -234,7 +235,7 @@ class AIDeployAgent:
                 key_path=server["ssh_key_path"],
             )
             await self._log(on_log, "✅ Connected! AI is now deploying your project...")
-            return await self._agent_loop(ssh, plan, server, on_log)
+            return await self._agent_loop(ssh, plan, credentials, on_log)
         except Exception as exc:
             logger.exception("ai_deploy.failed")
             raise
@@ -245,10 +246,10 @@ class AIDeployAgent:
         self,
         ssh: SSHClient,
         plan: DeploymentPlan,
-        server: dict,
+        credentials: dict[str, dict],
         on_log: LogCallback,
     ) -> tuple[str | None, list[str]]:
-        user_context = self._build_context(plan, server)
+        user_context = self._build_context(plan, credentials)
         logs: list[str] = []
         command_count = 0
 
@@ -369,13 +370,26 @@ class AIDeployAgent:
         return None, logs
 
     @staticmethod
-    def _build_context(plan: DeploymentPlan, server: dict) -> str:
+    def _build_context(plan: DeploymentPlan, credentials: dict[str, dict]) -> str:
+        server = credentials.get("server", {})
         base_path = server.get("base_path", "/var/www")
         public_url = server.get("public_base_url", "")
-        github = server.get("github", {})
-        github_info = ""
-        if github:
-            github_info = f"\n**GitHub token available**: yes (use for private repos)"
+        github = credentials.get("github", {})
+        cloudflare = credentials.get("cloudflare", {})
+
+        extras: list[str] = []
+        if github and github.get("token"):
+            extras.append("- **GitHub Token**: available (use for private repo clones)")
+        if cloudflare:
+            cf_token = cloudflare.get("token", "")
+            cf_acc = cloudflare.get("account_id", "")
+            extras.append(f"- **Cloudflare API Token**: `{cf_token}`")
+            if cf_acc:
+                extras.append(f"- **Cloudflare Account ID**: `{cf_acc}`")
+            extras.append("- **Cloudflare Usage**: Configure DNS records, Cloudflare Tunnels, CDN cache, or R2 Object Storage.")
+
+        extras_info = ("\n**Available Credentials & Integrations**:\n" + "\n".join(extras) + "\n") if extras else ""
+
         return (
             f"Deploy this project now. Do everything needed to make it live.\n\n"
             f"**Project**: {plan.project_name}\n"
@@ -386,7 +400,7 @@ class AIDeployAgent:
             f"**Server base path**: {base_path}\n"
             f"**Public URL base**: {public_url}\n"
             f"**Target directory**: {base_path}/{plan.project_name}\n"
-            f"{github_info}\n\n"
+            f"{extras_info}\n"
             f"Start by checking the server OS and what's already installed, "
             f"then proceed with the full deployment."
         )
@@ -495,6 +509,7 @@ class GroqDeployAgent:
         self.model = model
         self.max_commands = max_commands
         self.command_timeout = command_timeout
+        self._busy_notice_sent = False
 
     async def deploy(
         self,
@@ -518,7 +533,7 @@ class GroqDeployAgent:
                 key_path=server["ssh_key_path"],
             )
             await AIDeployAgent._log(on_log, "✅ Connected! AI is now deploying your project...")
-            return await self._agent_loop(ssh, plan, server, on_log)
+            return await self._agent_loop(ssh, plan, credentials, on_log)
         finally:
             await ssh.close()
 
@@ -526,14 +541,14 @@ class GroqDeployAgent:
         self,
         ssh: SSHClient,
         plan: DeploymentPlan,
-        server: dict,
+        credentials: dict[str, dict],
         on_log: LogCallback,
     ) -> tuple[str | None, list[str]]:
         logs: list[str] = []
         command_count = 0
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": _GROQ_SYSTEM_PROMPT},
-            {"role": "user", "content": AIDeployAgent._build_context(plan, server)},
+            {"role": "user", "content": AIDeployAgent._build_context(plan, credentials)},
         ]
 
         timeout = httpx.Timeout(max(60, self.command_timeout + 30))
@@ -642,10 +657,18 @@ class GroqDeployAgent:
                 response = await client.post(self.endpoint, headers=headers, json=payload)
                 if response.status_code in {429, 500, 502, 503, 504}:
                     wait_seconds = self._retry_wait(response, attempt)
-                    await AIDeployAgent._log(
-                        on_log,
-                        f"⏳ AI provider is busy. Retrying in {wait_seconds}s...",
+                    logger.warning(
+                        "groq_deploy.provider_busy",
+                        status_code=response.status_code,
+                        attempt=attempt,
+                        wait_seconds=wait_seconds,
                     )
+                    if not self._busy_notice_sent:
+                        self._busy_notice_sent = True
+                        await AIDeployAgent._log(
+                            on_log,
+                            "⏳ AI provider is busy, I will keep retrying quietly in the background.",
+                        )
                     await asyncio.sleep(wait_seconds)
                     continue
 
@@ -724,6 +747,9 @@ class GroqDeployAgent:
     @staticmethod
     def _retry_wait(response: httpx.Response, attempt: int) -> int:
         retry_after = response.headers.get("retry-after")
-        if retry_after and retry_after.isdigit():
-            return min(int(retry_after), 30)
+        if retry_after:
+            try:
+                return min(max(1, round(float(retry_after))), 30)
+            except ValueError:
+                pass
         return min(4 + (attempt * 3), 20)

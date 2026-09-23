@@ -96,3 +96,5 @@ class DeploymentPlan:
     build_steps: list[str]
     runtime: str
     notes: list[str] = field(default_factory=list)
+    app_path: str = "."
+    app_entry: str = "index.html"

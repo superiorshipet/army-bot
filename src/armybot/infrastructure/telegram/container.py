@@ -32,6 +32,12 @@ def _build_executor():
         from armybot.infrastructure.deploy.ai_agent import AIDeployAgent, GroqDeployAgent
 
         provider = settings.ai_provider.strip().lower()
+        strategy = settings.ai_deploy_strategy.strip().lower()
+        if provider == "groq" and strategy == "recipe":
+            from armybot.infrastructure.deploy.remote_executor import RemoteRecipeDeployExecutor
+
+            return RemoteRecipeDeployExecutor(command_timeout=settings.ai_command_timeout)
+
         if provider == "groq":
             return GroqDeployAgent(
                 api_key=settings.groq_api_key,

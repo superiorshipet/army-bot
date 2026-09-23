@@ -6,7 +6,12 @@ from aiogram.types import CallbackQuery, Message
 
 from armybot.domain.enums import CredentialProvider
 from armybot.infrastructure.telegram.container import container_scope
-from armybot.presentation.telegram.formatters import deployment_report, user_line
+from armybot.presentation.telegram.formatters import (
+    deployment_error_html,
+    deployment_report,
+    deployment_report_html,
+    user_line,
+)
 from armybot.presentation.telegram.keyboards import (
     access_decision_keyboard,
     admin_panel_keyboard,
@@ -340,7 +345,11 @@ async def receive_credential(message: Message, state: FSMContext) -> None:
 async def receive_deploy_repo(message: Message, state: FSMContext) -> None:
     if not message.from_user:
         return
-    args = (message.text or "").split()
+    text = (message.text or "").strip()
+    args = text.split()
+    if args and args[0].lower().startswith("/deploy"):
+        args = args[1:]
+
     if not args:
         await message.answer(
             "Send the repository URL or local path first.",
@@ -348,8 +357,8 @@ async def receive_deploy_repo(message: Message, state: FSMContext) -> None:
         )
         return
 
-    repo_url = args[0]
-    branch = args[1] if len(args) > 1 else "main"
+    repo_url = args[0].strip()
+    branch = args[1].strip() if len(args) > 1 else "main"
     await state.clear()
     notice = await message.answer("🚀 Deployment started...")
 
@@ -363,10 +372,10 @@ async def receive_deploy_repo(message: Message, state: FSMContext) -> None:
         async with container_scope() as c:
             user = await c.access.require_active(message.from_user.id)
             deployment = await c.deploy.deploy(user, repo_url, branch, on_log=_live_log)
-        await notice.edit_text(deployment_report(deployment), parse_mode="Markdown")
+        await notice.edit_text(deployment_report_html(deployment), parse_mode="HTML")
         await message.answer("What do you want to do next?", reply_markup=main_menu_keyboard(user.is_super_admin))
     except Exception as exc:
-        await notice.edit_text(f"❌ Deployment failed with error:\n\n`{str(exc)}`", parse_mode="Markdown")
+        await notice.edit_text(deployment_error_html(exc), parse_mode="HTML")
 
 
 
@@ -496,9 +505,9 @@ async def deploy(message: Message) -> None:
         async with container_scope() as c:
             user = await c.access.require_active(message.from_user.id)
             deployment = await c.deploy.deploy(user, repo_url, branch, on_log=_live_log)
-        await notice.edit_text(deployment_report(deployment), parse_mode="Markdown")
+        await notice.edit_text(deployment_report_html(deployment), parse_mode="HTML")
     except Exception as exc:
-        await notice.edit_text(f"❌ Deployment failed with error:\n\n`{str(exc)}`", parse_mode="Markdown")
+        await notice.edit_text(deployment_error_html(exc), parse_mode="HTML")
 
 
 
