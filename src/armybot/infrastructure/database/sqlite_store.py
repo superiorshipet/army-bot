@@ -164,6 +164,11 @@ class SqliteUserRepository:
             rows = conn.execute("SELECT * FROM users ORDER BY created_at DESC").fetchall()
         return [_row_to_user(row) for row in rows]
 
+    async def delete_by_telegram_id(self, telegram_id: int) -> bool:
+        with self.store._connect() as conn:
+            cursor = conn.execute("DELETE FROM users WHERE telegram_id = ?", (telegram_id,))
+            return cursor.rowcount > 0
+
     async def add_username_invite(self, invite: UsernameInvite) -> None:
         with self.store._connect() as conn:
             conn.execute(

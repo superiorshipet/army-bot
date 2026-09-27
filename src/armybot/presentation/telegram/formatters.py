@@ -6,22 +6,21 @@ from armybot.domain.entities import Deployment, User
 def user_line(user: User) -> str:
     username = f"@{user.username}" if user.username else "no username"
     phone = f" - {user.phone_number}" if user.phone_number else ""
-    return f"{user.full_name} ({username}) - `{user.telegram_id}`{phone} - {user.status.value}"
+    return f"{escape(user.full_name)} ({escape(username)}) - <code>{user.telegram_id}</code>{escape(phone)} - {escape(user.status.value)}"
 
 
 def deployment_report(deployment: Deployment) -> str:
-    logs = "\n".join(f"- {line}" for line in deployment.logs[-8:])
-    live = f"\nLive: {deployment.live_url}" if deployment.live_url else ""
-    return (
-        f"Deployment `{deployment.status.value}`\n"
-        f"Branch: `{deployment.branch}`"
-        f"{live}\n\n"
-        f"Logs:\n{logs}"
-    )
+    return deployment_report_html(deployment)
 
 
 def deployment_report_html(deployment: Deployment) -> str:
-    logs = "\n".join(f"- {escape(line)}" for line in deployment.logs[-8:])
+    raw_logs = deployment.logs[-8:]
+    safe_lines = []
+    for line in raw_logs:
+        if len(line) > 200:
+            line = line[:197] + "..."
+        safe_lines.append(f"- {escape(line)}")
+    logs = "\n".join(safe_lines)
     live = f"\nLive: {escape(deployment.live_url)}" if deployment.live_url else ""
     return (
         f"Deployment <code>{escape(deployment.status.value)}</code>\n"

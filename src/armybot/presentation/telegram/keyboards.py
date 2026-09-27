@@ -2,7 +2,7 @@ from uuid import UUID
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
-from armybot.domain.entities import Project
+from armybot.domain.entities import Project, User
 from armybot.domain.enums import CredentialProvider
 
 
@@ -24,12 +24,12 @@ def access_decision_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def main_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
+def main_menu_keyboard(is_admin: bool = False, has_server_cred: bool = False) -> InlineKeyboardMarkup:
+    top_row = [InlineKeyboardButton(text="Setup credentials", callback_data="menu:setup")]
+    if has_server_cred:
+        top_row.append(InlineKeyboardButton(text="Deploy project", callback_data="menu:deploy"))
     rows = [
-        [
-            InlineKeyboardButton(text="Setup credentials", callback_data="menu:setup"),
-            InlineKeyboardButton(text="Deploy project", callback_data="menu:deploy"),
-        ],
+        top_row,
         [
             InlineKeyboardButton(text="Projects", callback_data="menu:projects"),
             InlineKeyboardButton(text="Status", callback_data="menu:status"),
@@ -55,12 +55,33 @@ def start_reply_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
 def admin_panel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Add user", callback_data="admin:add_user")],
-            [InlineKeyboardButton(text="All users", callback_data="admin:users")],
-            [InlineKeyboardButton(text="Pending users", callback_data="admin:pending")],
+            [
+                InlineKeyboardButton(text="Add user", callback_data="admin:add_user"),
+                InlineKeyboardButton(text="All users", callback_data="admin:users"),
+            ],
+            [
+                InlineKeyboardButton(text="Pending users", callback_data="admin:pending"),
+                InlineKeyboardButton(text="Rejected users", callback_data="admin:rejected"),
+            ],
             [InlineKeyboardButton(text="Back to menu", callback_data="menu:home")],
         ]
     )
+
+
+def rejected_users_keyboard(users: list[User]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for user in users:
+        label = user.full_name or user.username or str(user.telegram_id)
+        if len(label) > 16:
+            label = label[:14] + ".."
+        rows.append([
+            InlineKeyboardButton(
+                text=f"🔄 Un-reject {label}",
+                callback_data=f"admin:unreject:{user.telegram_id}",
+            )
+        ])
+    rows.append([InlineKeyboardButton(text="⬅️ Back to Admin panel", callback_data="menu:admin")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def setup_keyboard(saved_providers: set[CredentialProvider]) -> InlineKeyboardMarkup:

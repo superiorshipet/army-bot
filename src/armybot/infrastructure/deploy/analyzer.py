@@ -123,6 +123,15 @@ class FilesystemRepoAnalyzer:
             candidates.append(package_json.parent)
         for package_json in repo_path.glob("*/package.json"):
             candidates.append(package_json.parent)
+        for java_marker in (
+            *repo_path.glob("*/pom.xml"),
+            *repo_path.glob("*/*/pom.xml"),
+            *repo_path.glob("*/build.gradle"),
+            *repo_path.glob("*/*/build.gradle"),
+            *repo_path.glob("*/build.gradle.kts"),
+            *repo_path.glob("*/*/build.gradle.kts"),
+        ):
+            candidates.append(java_marker.parent)
         for html_file in repo_path.rglob("*.html"):
             if any(part in {".git", "node_modules", "vendor", "dist", "build"} for part in html_file.parts):
                 continue
@@ -141,6 +150,8 @@ class FilesystemRepoAnalyzer:
         files = {path.name for path in repo_path.iterdir() if path.is_file()}
         if "composer.json" in files and "artisan" in files:
             return ProjectStack.Laravel, ["composer install --no-dev", "php artisan migrate --force"], "php-fpm", "index.php"
+        if FilesystemRepoAnalyzer._is_spring_boot(repo_path):
+            return ProjectStack.SpringBoot, ["mvn package -DskipTests or gradle bootJar"], "systemd", ""
         if any(path.suffix == ".csproj" for path in repo_path.rglob("*.csproj")):
             return ProjectStack.DotNet, ["dotnet restore", "dotnet publish -c Release"], "systemd", ""
         if "package.json" in files:
@@ -156,6 +167,26 @@ class FilesystemRepoAnalyzer:
         if html_entry:
             return ProjectStack.Static, ["copy static files"], "nginx-static", html_entry
         return ProjectStack.Unknown, ["manual inspection required"], "unknown", "index.html"
+
+    @staticmethod
+    def _is_spring_boot(repo_path: Path) -> bool:
+        markers = [
+            repo_path / "pom.xml",
+            repo_path / "build.gradle",
+            repo_path / "build.gradle.kts",
+        ]
+        content = "\n".join(
+            marker.read_text(errors="ignore").lower()
+            for marker in markers
+            if marker.exists()
+        )
+        if not content:
+            return False
+        return (
+            "spring-boot" in content
+            or "org.springframework.boot" in content
+            or "springframework.boot" in content
+        )
 
     @staticmethod
     def _detect_html_entry(repo_path: Path) -> str | None:

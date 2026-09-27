@@ -153,6 +153,12 @@ class AccessService:
     async def pending_users(self) -> list[User]:
         return await self.users.list_by_status(UserStatus.Pending)
 
+    async def rejected_users(self) -> list[User]:
+        return await self.users.list_by_status(UserStatus.Rejected)
+
+    async def unreject(self, telegram_id: int) -> bool:
+        return await self.users.delete_by_telegram_id(telegram_id)
+
     async def all_users(self) -> list[User]:
         return await self.users.list_all()
 

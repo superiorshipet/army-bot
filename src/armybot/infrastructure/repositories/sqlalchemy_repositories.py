@@ -73,6 +73,14 @@ class SqlUserRepository:
         rows = await self.session.scalars(select(UserModel).order_by(UserModel.created_at.desc()))
         return [to_user(row) for row in rows]
 
+    async def delete_by_telegram_id(self, telegram_id: int) -> bool:
+        model = await self.session.scalar(select(UserModel).where(UserModel.telegram_id == telegram_id))
+        if model:
+            await self.session.delete(model)
+            await self.session.flush()
+            return True
+        return False
+
     async def add_username_invite(self, invite: UsernameInvite) -> None:
         model = await self.session.get(UsernameInviteModel, invite.username)
         if model:

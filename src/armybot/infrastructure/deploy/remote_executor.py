@@ -38,6 +38,8 @@ class RemoteRecipeDeployExecutor:
             script = self._python_site_script(plan, server, live_url)
         elif plan.stack == ProjectStack.DotNet:
             script = self._dotnet_site_script(plan, server, live_url)
+        elif plan.stack == ProjectStack.SpringBoot:
+            script = self._spring_boot_site_script(plan, server, live_url)
         elif plan.stack == ProjectStack.Laravel:
             script = self._laravel_site_script(plan, server, live_url)
         else:
@@ -974,6 +976,143 @@ sudo systemctl reload nginx
 echo "[7/7] Verifying public URL"
 sleep 3
 curl -k -L --fail --max-time 30 "$LIVE_URL" >/dev/null || curl -k -L --max-time 10 "http://127.0.0.1:$PORT/" >/dev/null || true
+
+echo "Deployment complete: $LIVE_URL"
+"""
+
+
+    @staticmethod
+    def _spring_boot_site_script(plan: DeploymentPlan, server: dict, live_url: str) -> str:
+        base_path = server.get("base_path", "/var/www")
+        project = RemoteRecipeDeployExecutor._safe_name(plan.project_name)
+        route_prefix = f"/{project}/"
+        route_clean = f"/{project}"
+        repo_url = plan.repo_url.replace("'", "'\\''")
+        branch = plan.branch.replace("'", "'\\''")
+        app_path = plan.app_path.replace("'", "'\\''")
+        nginx_name = f"army-{project}"
+        service_name = f"army-{project}"
+
+        prep = RemoteRecipeDeployExecutor._common_git_prep(project, repo_url, branch, base_path, app_path)
+
+        return f"""#!/usr/bin/env bash
+set -euo pipefail
+{prep}
+NGINX_NAME='{nginx_name}'
+SERVICE_NAME='{service_name}'
+ROUTE_PREFIX='{route_prefix}'
+ROUTE_CLEAN='{route_clean}'
+LIVE_URL='{live_url}'
+
+cd "$BUILD_DIR"
+
+if [ -f "$APP_DIR/.port" ]; then
+  PORT=$(cat "$APP_DIR/.port")
+else
+  PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()')
+  echo "$PORT" > "$APP_DIR/.port"
+fi
+
+echo "[3/7] Ensuring Java runtime is available"
+if ! command -v java >/dev/null 2>&1; then
+  sudo apt-get update
+  sudo apt-get install -y openjdk-21-jdk || sudo apt-get install -y openjdk-17-jdk
+fi
+
+echo "[4/7] Building Spring Boot jar"
+if [ -x ./mvnw ]; then
+  ./mvnw -DskipTests package
+elif [ -f pom.xml ]; then
+  if ! command -v mvn >/dev/null 2>&1; then
+    sudo apt-get update
+    sudo apt-get install -y maven
+  fi
+  mvn -DskipTests package
+elif [ -x ./gradlew ]; then
+  ./gradlew bootJar -x test || ./gradlew build -x test
+elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then
+  if ! command -v gradle >/dev/null 2>&1; then
+    sudo apt-get update
+    sudo apt-get install -y gradle
+  fi
+  gradle bootJar -x test || gradle build -x test
+else
+  echo "No Maven or Gradle Spring Boot build file found." >&2
+  exit 30
+fi
+
+JAR_FILE=$(find "$BUILD_DIR/target" "$BUILD_DIR/build/libs" -maxdepth 1 -type f -name "*.jar" \
+  ! -name "*plain*.jar" ! -name "*sources*.jar" ! -name "*javadoc*.jar" 2>/dev/null | head -n 1 || true)
+if [ -z "$JAR_FILE" ]; then
+  echo "No runnable Spring Boot jar was produced." >&2
+  exit 31
+fi
+
+echo "Selected jar: $JAR_FILE"
+
+if [ ! -f "$APP_DIR/.env" ]; then
+  touch "$APP_DIR/.env"
+fi
+if ! grep -q "^SERVER_PORT=" "$APP_DIR/.env" 2>/dev/null; then
+  echo "SERVER_PORT=$PORT" >> "$APP_DIR/.env"
+fi
+if ! grep -q "^PORT=" "$APP_DIR/.env" 2>/dev/null; then
+  echo "PORT=$PORT" >> "$APP_DIR/.env"
+fi
+
+echo "[5/7] Configuring systemd service"
+sudo tee "/etc/systemd/system/$SERVICE_NAME.service" >/dev/null <<SERVICE
+[Unit]
+Description=Army Deploy - $PROJECT (Spring Boot)
+After=network.target
+
+[Service]
+Type=simple
+User=$USER
+WorkingDirectory=$BUILD_DIR
+EnvironmentFile=-$APP_DIR/.env
+Environment=PORT=$PORT
+Environment=SERVER_PORT=$PORT
+Environment=SPRING_PROFILES_ACTIVE=prod
+Environment=JAR_FILE=$JAR_FILE
+ExecStart=/bin/bash -lc 'exec /usr/bin/java -jar "$JAR_FILE" --server.port="$PORT" --server.address=127.0.0.1 --server.servlet.context-path="$ROUTE_CLEAN"'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+
+sudo systemctl daemon-reload
+sudo systemctl enable "$SERVICE_NAME.service"
+sudo systemctl restart "$SERVICE_NAME.service"
+
+echo "[6/7] Writing nginx proxy include"
+sudo mkdir -p /etc/nginx/army-locations
+sudo tee "/etc/nginx/army-locations/$NGINX_NAME.conf" >/dev/null <<NGINX
+location = $ROUTE_CLEAN {{
+    return 301 $ROUTE_PREFIX;
+}}
+
+location ^~ $ROUTE_PREFIX {{
+    proxy_pass http://127.0.0.1:$PORT$ROUTE_PREFIX;
+    proxy_http_version 1.1;
+    proxy_set_header Host \$http_host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 120;
+}}
+NGINX
+
+sudo nginx -t
+sudo systemctl reload nginx
+
+echo "[7/7] Verifying service and public URL"
+sleep 5
+curl -k -L --fail --max-time 30 "$LIVE_URL" >/dev/null || curl -k -L --max-time 10 "http://127.0.0.1:$PORT$ROUTE_CLEAN/" >/dev/null || true
 
 echo "Deployment complete: $LIVE_URL"
 """

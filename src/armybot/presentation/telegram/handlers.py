@@ -1,10 +1,11 @@
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, ReplyKeyboardRemove
 
-from armybot.domain.enums import CredentialProvider
+from armybot.domain.enums import CredentialProvider, UserStatus
 from armybot.infrastructure.telegram.container import container_scope
 from armybot.presentation.telegram.formatters import (
     deployment_error_html,
@@ -21,8 +22,8 @@ from armybot.presentation.telegram.keyboards import (
     project_details_keyboard,
     projects_list_keyboard,
     provider_label,
+    rejected_users_keyboard,
     setup_keyboard,
-    start_reply_keyboard,
 )
 from armybot.shared.settings import settings
 
@@ -54,17 +55,41 @@ async def start(message: Message) -> None:
         )
 
     if user.is_active:
-        await message.answer(
-            "Quick buttons are ready.",
-            reply_markup=start_reply_keyboard(user.is_super_admin),
-        )
+        async with container_scope() as c:
+            creds = await c.credentials_repo.list_for_user(user.id)
+            has_server_cred = any(cr.provider == CredentialProvider.Server for cr in creds)
+        try:
+            rm = await message.answer("...", reply_markup=ReplyKeyboardRemove())
+            await rm.delete()
+        except Exception:
+            pass
         await message.answer(
             "Welcome to Army Deploy.\nChoose what you want to do:",
-            reply_markup=main_menu_keyboard(user.is_super_admin),
+            reply_markup=main_menu_keyboard(user.is_super_admin, has_server_cred=has_server_cred),
         )
         return
 
-    await message.answer("طلبك اتبعت للادمن. هتقدر تستخدم البوت بعد الموافقة.")
+    if user.status == UserStatus.Pending:
+        await message.answer(
+            "⏳ طلبك قيد المراجعة من الأدمن. هتقدر تستخدم البوت فور الموافقة على حسابك.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+    elif user.status == UserStatus.Rejected:
+        await message.answer(
+            "❌ تم رفض طلب انضمامك مسبقاً. تواصل مع الأدمن إذا كنت تعتقد أن هذا خطأ.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+    elif user.status == UserStatus.Suspended:
+        await message.answer(
+            "⛔ تم إيقاف حسابك مؤقتاً بواسطة الأدمن.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+    else:
+        await message.answer(
+            "طلبك اتبعت للادمن. هتقدر تستخدم البوت بعد الموافقة.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+
     if created:
         text = f"New access request:\n{user_line(user)}"
         for admin_id in settings.super_admin_ids:
@@ -72,7 +97,7 @@ async def start(message: Message) -> None:
                 admin_id,
                 text,
                 reply_markup=access_decision_keyboard(user.telegram_id),
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
 
 
@@ -102,6 +127,23 @@ async def reply_deploy(message: Message, state: FSMContext) -> None:
         return
     async with container_scope() as c:
         user = await c.access.require_active(message.from_user.id)
+        creds = await c.credentials_repo.list_for_user(user.id)
+        has_server_cred = any(cr.provider == CredentialProvider.Server for cr in creds)
+
+    if not has_server_cred:
+        await message.answer(
+            "⚠️ <b>Server credentials required!</b>\n\n"
+            "You must configure your <b>Server</b> credentials first before you can deploy any project.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="⚙️ Setup Server credentials", callback_data="cred:add:server")],
+                    [InlineKeyboardButton(text="⬅️ Back to menu", callback_data="menu:home")],
+                ]
+            ),
+            parse_mode="HTML",
+        )
+        return
+
     await state.set_state(SetupFlow.waiting_deploy_repo)
     await message.answer(
         "Send the repository URL or local path.\n"
@@ -109,7 +151,7 @@ async def reply_deploy(message: Message, state: FSMContext) -> None:
         "repo_url branch\n\n"
         "Example:\n"
         "https://github.com/user/project main",
-        reply_markup=start_reply_keyboard(user.is_super_admin),
+        reply_markup=deploy_prompt_keyboard(),
     )
 
 
@@ -123,7 +165,7 @@ async def reply_projects(message: Message) -> None:
     if not rows:
         await message.answer(
             "No projects yet. Use Deploy project from the menu.",
-            reply_markup=start_reply_keyboard(user.is_super_admin),
+            reply_markup=main_menu_keyboard(user.is_super_admin),
         )
         return
     text = "📦 <b>Your Projects:</b>\n\n" + "\n".join(
@@ -141,10 +183,18 @@ async def reply_projects(message: Message) -> None:
 async def reply_status(message: Message) -> None:
     if not message.from_user:
         return
+    text = await _status_text(message.from_user.id)
     await message.answer(
-        await _status_text(message.from_user.id),
-        reply_markup=start_reply_keyboard(await _is_admin(message.from_user.id)),
-        parse_mode="Markdown",
+        text,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="🔄 Refresh", callback_data="menu:status"),
+                    InlineKeyboardButton(text="⬅️ Back to menu", callback_data="menu:home"),
+                ]
+            ]
+        ),
+        parse_mode="HTML",
     )
 
 
@@ -156,7 +206,7 @@ async def reply_admin(message: Message) -> None:
         await c.access.require_super_admin(message.from_user.id)
         users = await c.access.pending_users()
     text = "Admin panel\nNo pending users." if not users else "Pending users:\n" + "\n".join(user_line(user) for user in users)
-    await message.answer(text, reply_markup=admin_panel_keyboard(), parse_mode="Markdown")
+    await message.answer(text, reply_markup=admin_panel_keyboard(), parse_mode="HTML")
 
 
 @router.message(F.contact)
@@ -176,11 +226,12 @@ async def receive_contact(message: Message) -> None:
         )
 
     if user:
-        await message.answer(
-            "Phone matched. Your account is active now.",
-            reply_markup=start_reply_keyboard(user.is_super_admin),
-        )
-        await message.answer("Choose what you want to do:", reply_markup=main_menu_keyboard(user.is_super_admin))
+        try:
+            rm = await message.answer("Phone matched. Your account is active now.", reply_markup=ReplyKeyboardRemove())
+            await rm.delete()
+        except Exception:
+            pass
+        await message.answer("Welcome to Army Deploy. Choose what you want to do:", reply_markup=await _main_menu_for(user.telegram_id))
         return
 
     await message.answer("This phone number is not approved yet. Ask the admin to add it first.")
@@ -191,11 +242,9 @@ async def menu_home(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     if not callback.from_user:
         return
-    async with container_scope() as c:
-        user = await c.access.require_active(callback.from_user.id)
     await callback.message.edit_text(
         "Army Deploy main menu:",
-        reply_markup=main_menu_keyboard(user.is_super_admin),
+        reply_markup=await _main_menu_for(callback.from_user.id),
     )
     await callback.answer()
 
@@ -217,7 +266,25 @@ async def menu_deploy(callback: CallbackQuery, state: FSMContext) -> None:
     if not callback.from_user:
         return
     async with container_scope() as c:
-        await c.access.require_active(callback.from_user.id)
+        user = await c.access.require_active(callback.from_user.id)
+        creds = await c.credentials_repo.list_for_user(user.id)
+        has_server_cred = any(cr.provider == CredentialProvider.Server for cr in creds)
+
+    if not has_server_cred:
+        await callback.message.edit_text(
+            "⚠️ <b>Server credentials required!</b>\n\n"
+            "You must configure your <b>Server</b> credentials first before you can deploy any project.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="⚙️ Setup Server credentials", callback_data="cred:add:server")],
+                    [InlineKeyboardButton(text="⬅️ Back to menu", callback_data="menu:home")],
+                ]
+            ),
+            parse_mode="HTML",
+        )
+        await callback.answer()
+        return
+
     await state.set_state(SetupFlow.waiting_deploy_repo)
     await callback.message.edit_text(
         "Send the repository URL or local path.\n"
@@ -260,7 +327,22 @@ async def menu_status(callback: CallbackQuery) -> None:
     if not callback.from_user:
         return
     text = await _status_text(callback.from_user.id)
-    await callback.message.edit_text(text, reply_markup=await _main_menu_for(callback.from_user.id), parse_mode="Markdown")
+    try:
+        await callback.message.edit_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="🔄 Refresh", callback_data="menu:status"),
+                        InlineKeyboardButton(text="⬅️ Back to menu", callback_data="menu:home"),
+                    ]
+                ]
+            ),
+            parse_mode="HTML",
+        )
+    except TelegramBadRequest as err:
+        if "message is not modified" not in str(err).lower():
+            raise
     await callback.answer()
 
 
@@ -275,7 +357,11 @@ async def menu_admin(callback: CallbackQuery) -> None:
         text = "Admin panel\nNo pending users."
     else:
         text = "Pending users:\n" + "\n".join(user_line(user) for user in users)
-    await callback.message.edit_text(text, reply_markup=admin_panel_keyboard(), parse_mode="Markdown")
+    try:
+        await callback.message.edit_text(text, reply_markup=admin_panel_keyboard(), parse_mode="HTML")
+    except TelegramBadRequest as err:
+        if "message is not modified" not in str(err).lower():
+            raise
     await callback.answer()
 
 
@@ -287,7 +373,11 @@ async def admin_pending(callback: CallbackQuery) -> None:
         await c.access.require_super_admin(callback.from_user.id)
         users = await c.access.pending_users()
     text = "No pending users." if not users else "Pending users:\n" + "\n".join(user_line(user) for user in users)
-    await callback.message.edit_text(text, reply_markup=admin_panel_keyboard(), parse_mode="Markdown")
+    try:
+        await callback.message.edit_text(text, reply_markup=admin_panel_keyboard(), parse_mode="HTML")
+    except TelegramBadRequest as err:
+        if "message is not modified" not in str(err).lower():
+            raise
     await callback.answer()
 
 
@@ -296,8 +386,58 @@ async def admin_users(callback: CallbackQuery) -> None:
     if not callback.from_user:
         return
     text = await _all_users_text(callback.from_user.id)
-    await callback.message.edit_text(text, reply_markup=admin_panel_keyboard(), parse_mode="Markdown")
+    try:
+        await callback.message.edit_text(text, reply_markup=admin_panel_keyboard(), parse_mode="HTML")
+    except TelegramBadRequest as err:
+        if "message is not modified" not in str(err).lower():
+            raise
     await callback.answer()
+
+
+@router.callback_query(F.data == "admin:rejected")
+async def admin_rejected(callback: CallbackQuery) -> None:
+    if not callback.from_user:
+        return
+    async with container_scope() as c:
+        await c.access.require_super_admin(callback.from_user.id)
+        users = await c.access.rejected_users()
+    if not users:
+        text = "Admin panel\nNo rejected users."
+        markup = admin_panel_keyboard()
+    else:
+        text = "🚫 <b>Rejected users:</b>\n\n" + "\n".join(user_line(user) for user in users)
+        markup = rejected_users_keyboard(users)
+    try:
+        await callback.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+    except TelegramBadRequest as err:
+        if "message is not modified" not in str(err).lower():
+            raise
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:unreject:"))
+async def admin_unreject_callback(callback: CallbackQuery) -> None:
+    if not callback.from_user or not callback.data:
+        return
+    raw_telegram_id = callback.data.split(":", 2)[2]
+    telegram_id = int(raw_telegram_id)
+    async with container_scope() as c:
+        await c.access.require_super_admin(callback.from_user.id)
+        await c.access.unreject(telegram_id)
+        users = await c.access.rejected_users()
+
+    await callback.answer("✅ Removed from rejected list.")
+    if not users:
+        text = "Admin panel\nNo rejected users remaining."
+        markup = admin_panel_keyboard()
+    else:
+        text = "🚫 <b>Rejected users:</b>\n\n" + "\n".join(user_line(user) for user in users)
+        markup = rejected_users_keyboard(users)
+    try:
+        await callback.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+    except TelegramBadRequest as err:
+        if "message is not modified" not in str(err).lower():
+            raise
 
 
 @router.callback_query(F.data == "admin:add_user")
@@ -404,9 +544,24 @@ async def receive_deploy_repo(message: Message, state: FSMContext) -> None:
     try:
         async with container_scope() as c:
             user = await c.access.require_active(message.from_user.id)
+            creds = await c.credentials_repo.list_for_user(user.id)
+            has_server_cred = any(cr.provider == CredentialProvider.Server for cr in creds)
+            if not has_server_cred:
+                await notice.edit_text(
+                    "⚠️ <b>Server credentials required!</b>\n\n"
+                    "You must configure your <b>Server</b> credentials first before you can deploy any project.",
+                    reply_markup=InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [InlineKeyboardButton(text="⚙️ Setup Server credentials", callback_data="cred:add:server")],
+                            [InlineKeyboardButton(text="⬅️ Back to menu", callback_data="menu:home")],
+                        ]
+                    ),
+                    parse_mode="HTML",
+                )
+                return
             deployment = await c.deploy.deploy(user, repo_url, branch, on_log=_live_log)
         await notice.edit_text(deployment_report_html(deployment), parse_mode="HTML")
-        await message.answer("What do you want to do next?", reply_markup=main_menu_keyboard(user.is_super_admin))
+        await message.answer("What do you want to do next?", reply_markup=await _main_menu_for(message.from_user.id))
     except Exception as exc:
         await notice.edit_text(deployment_error_html(exc), parse_mode="HTML")
 
@@ -435,7 +590,7 @@ async def receive_user_to_add(message: Message, state: FSMContext) -> None:
     await message.answer(
         _added_user_text(user_or_invite),
         reply_markup=admin_panel_keyboard(),
-        parse_mode="Markdown",
+        parse_mode="HTML",
     )
     if hasattr(user_or_invite, "telegram_id"):
         try:
@@ -737,13 +892,8 @@ async def project_delete_confirm(callback: CallbackQuery) -> None:
 async def status(message: Message) -> None:
     if not message.from_user:
         return
-    async with container_scope() as c:
-        user = await c.access.require_active(message.from_user.id)
-        deployments = await c.deployments.latest_for_user(user.id, limit=5)
-    if not deployments:
-        await message.answer("Bot is running. No deployments yet.")
-        return
-    await message.answer("\n\n".join(deployment_report(item) for item in deployments), parse_mode="Markdown")
+    text = await _status_text(message.from_user.id)
+    await message.answer(text, parse_mode="HTML")
 
 
 @router.message(Command("pending"))
@@ -756,14 +906,14 @@ async def pending(message: Message) -> None:
     if not users:
         await message.answer("No pending users.")
         return
-    await message.answer("\n".join(user_line(user) for user in users), parse_mode="Markdown")
+    await message.answer("\n".join(user_line(user) for user in users), parse_mode="HTML")
 
 
 @router.message(Command("users"))
 async def users(message: Message) -> None:
     if not message.from_user:
         return
-    await message.answer(await _all_users_text(message.from_user.id), parse_mode="Markdown")
+    await message.answer(await _all_users_text(message.from_user.id), parse_mode="HTML")
 
 
 @router.message(Command("add_user"))
@@ -786,7 +936,7 @@ async def add_user(message: Message) -> None:
     await message.answer(
         _added_user_text(user_or_invite),
         reply_markup=admin_panel_keyboard(),
-        parse_mode="Markdown",
+        parse_mode="HTML",
     )
 
 
@@ -805,6 +955,41 @@ async def suspend(message: Message) -> None:
     await _admin_status_command(message, "suspend")
 
 
+@router.message(Command("rejected"))
+async def rejected_command(message: Message) -> None:
+    if not message.from_user:
+        return
+    async with container_scope() as c:
+        await c.access.require_super_admin(message.from_user.id)
+        users = await c.access.rejected_users()
+    if not users:
+        await message.answer("No rejected users.")
+        return
+    await message.answer(
+        "🚫 <b>Rejected users:</b>\n\n" + "\n".join(user_line(user) for user in users),
+        reply_markup=rejected_users_keyboard(users),
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("unreject"))
+async def unreject_command(message: Message) -> None:
+    if not message.from_user:
+        return
+    raw_id = _command_args(message).strip()
+    if not raw_id.isdigit():
+        await message.answer("Usage: /unreject <telegram_id>")
+        return
+    telegram_id = int(raw_id)
+    async with container_scope() as c:
+        await c.access.require_super_admin(message.from_user.id)
+        deleted = await c.access.unreject(telegram_id)
+    if deleted:
+        await message.answer(f"✅ User <code>{telegram_id}</code> removed from rejected list. They can now send /start again.", parse_mode="HTML")
+    else:
+        await message.answer(f"User <code>{telegram_id}</code> was not found in database.", parse_mode="HTML")
+
+
 @router.callback_query(F.data.startswith("access:"))
 async def access_callback(callback: CallbackQuery) -> None:
     if not callback.from_user or not callback.data:
@@ -815,11 +1000,11 @@ async def access_callback(callback: CallbackQuery) -> None:
         await c.access.require_super_admin(callback.from_user.id)
         if action == "approve":
             user = await c.access.approve(telegram_id)
-            await callback.bot.send_message(telegram_id, "تم تفعيل حسابك. اكتب /setup.")
+            await callback.bot.send_message(telegram_id, "تم تفعيل حسابك. اكتب /setup أو /start.")
         else:
             user = await c.access.reject(telegram_id)
             await callback.bot.send_message(telegram_id, "تم رفض طلب استخدام البوت.")
-    await callback.message.edit_text(f"{action.title()}d:\n{user_line(user)}", parse_mode="Markdown")
+    await callback.message.edit_text(f"{action.title()}d:\n{user_line(user)}", parse_mode="HTML")
     await callback.answer()
 
 
@@ -838,13 +1023,15 @@ async def _admin_status_command(message: Message, action: str) -> None:
             user = await c.access.reject(int(raw_id))
         else:
             user = await c.access.suspend(int(raw_id))
-    await message.answer(f"Done:\n{user_line(user)}", parse_mode="Markdown")
+    await message.answer(f"Done:\n{user_line(user)}", parse_mode="HTML")
 
 
 async def _main_menu_for(telegram_id: int):
     async with container_scope() as c:
         user = await c.access.require_active(telegram_id)
-    return main_menu_keyboard(user.is_super_admin)
+        creds = await c.credentials_repo.list_for_user(user.id)
+        has_server_cred = any(cr.provider == CredentialProvider.Server for cr in creds)
+    return main_menu_keyboard(user.is_super_admin, has_server_cred=has_server_cred)
 
 
 async def _is_admin(telegram_id: int) -> bool:
@@ -1018,7 +1205,11 @@ async def _projects_text(telegram_id: int) -> str:
 async def _status_text(telegram_id: int) -> str:
     async with container_scope() as c:
         user = await c.access.require_active(telegram_id)
-        deployments = await c.deployments.latest_for_user(user.id, limit=5)
+        deployments = await c.deployments.latest_for_user(user.id, limit=3)
     if not deployments:
         return "Bot is running. No deployments yet."
-    return "\n\n".join(deployment_report(item) for item in deployments)
+    reports = [deployment_report_html(item) for item in deployments]
+    text = "\n\n──────────────\n\n".join(reports)
+    if len(text) > 3800:
+        text = text[:3800] + "\n...[truncated]"
+    return text

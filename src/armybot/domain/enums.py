@@ -34,6 +34,7 @@ class ProjectStack(StrEnum):
     Vite = "vite"
     React = "react"
     DotNet = "dotnet"
+    SpringBoot = "spring_boot"
     Laravel = "laravel"
     Node = "node"
     Python = "python"
