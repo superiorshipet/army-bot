@@ -1,4 +1,11 @@
-from armybot.domain.entities import Deployment, PhoneInvite, Project, User, UserCredential, UsernameInvite
+from armybot.domain.entities import (
+    Deployment,
+    PhoneInvite,
+    Project,
+    User,
+    UserCredential,
+    UsernameInvite,
+)
 from armybot.infrastructure.database.models import (
     DeploymentModel,
     PhoneInviteModel,

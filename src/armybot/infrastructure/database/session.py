@@ -10,7 +10,9 @@ class Base(DeclarativeBase):
     pass
 
 
-engine = create_async_engine(settings.database_url, pool_pre_ping=True, pool_size=5, max_overflow=10)
+engine = create_async_engine(
+    settings.database_url, pool_pre_ping=True, pool_size=5, max_overflow=10
+)
 SessionFactory = async_sessionmaker(engine, expire_on_commit=False)
 
 
@@ -19,6 +21,9 @@ async def create_schema() -> None:
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        from armybot.infrastructure.database.migrations import apply_migrations
+
+        await apply_migrations(conn)
 
 
 async def session_scope() -> AsyncIterator[AsyncSession]:

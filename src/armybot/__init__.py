@@ -1,2 +1,1 @@
 """Army Deploy Bot."""
-

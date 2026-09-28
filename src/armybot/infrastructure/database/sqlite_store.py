@@ -4,7 +4,14 @@ from datetime import datetime
 from pathlib import Path
 from uuid import UUID
 
-from armybot.domain.entities import Deployment, PhoneInvite, Project, User, UserCredential, UsernameInvite
+from armybot.domain.entities import (
+    Deployment,
+    PhoneInvite,
+    Project,
+    User,
+    UserCredential,
+    UsernameInvite,
+)
 from armybot.domain.enums import (
     CredentialProvider,
     DeploymentStatus,
@@ -32,6 +39,9 @@ class SqliteStore:
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("PRAGMA journal_mode = WAL")
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -97,11 +107,20 @@ class SqliteStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL
+                );
                 """
             )
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
             if "phone_number" not in columns:
                 conn.execute("ALTER TABLE users ADD COLUMN phone_number TEXT")
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                (1, datetime.now().astimezone().isoformat()),
+            )
 
 
 class SqliteUserRepository:
@@ -115,17 +134,23 @@ class SqliteUserRepository:
 
     async def get_by_telegram_id(self, telegram_id: int) -> User | None:
         with self.store._connect() as conn:
-            row = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)
+            ).fetchone()
         return _row_to_user(row) if row else None
 
     async def get_by_username(self, username: str) -> User | None:
         with self.store._connect() as conn:
-            row = conn.execute("SELECT * FROM users WHERE lower(username) = ?", (username.lower(),)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM users WHERE lower(username) = ?", (username.lower(),)
+            ).fetchone()
         return _row_to_user(row) if row else None
 
     async def get_by_phone_number(self, phone_number: str) -> User | None:
         with self.store._connect() as conn:
-            row = conn.execute("SELECT * FROM users WHERE phone_number = ?", (phone_number,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM users WHERE phone_number = ?", (phone_number,)
+            ).fetchone()
         return _row_to_user(row) if row else None
 
     async def add(self, user: User) -> None:
@@ -151,7 +176,14 @@ class SqliteUserRepository:
         with self.store._connect() as conn:
             conn.execute(
                 "UPDATE users SET full_name=?, username=?, phone_number=?, role=?, status=? WHERE id=?",
-                (user.full_name, user.username, user.phone_number, user.role.value, user.status.value, str(user.id)),
+                (
+                    user.full_name,
+                    user.username,
+                    user.phone_number,
+                    user.role.value,
+                    user.status.value,
+                    str(user.id),
+                ),
             )
 
     async def list_by_status(self, status: UserStatus) -> list[User]:
@@ -185,7 +217,9 @@ class SqliteUserRepository:
         if not username:
             return None
         with self.store._connect() as conn:
-            row = conn.execute("SELECT * FROM username_invites WHERE username = ?", (username,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM username_invites WHERE username = ?", (username,)
+            ).fetchone()
         return _row_to_username_invite(row) if row else None
 
     async def add_phone_invite(self, invite: PhoneInvite) -> None:
@@ -204,7 +238,9 @@ class SqliteUserRepository:
         if not phone_number:
             return None
         with self.store._connect() as conn:
-            row = conn.execute("SELECT * FROM phone_invites WHERE phone_number = ?", (phone_number,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM phone_invites WHERE phone_number = ?", (phone_number,)
+            ).fetchone()
         return _row_to_phone_invite(row) if row else None
 
 
@@ -309,7 +345,9 @@ class SqliteProjectRepository:
 
     async def list_for_user(self, user_id: UUID) -> list[Project]:
         with self.store._connect() as conn:
-            rows = conn.execute("SELECT * FROM projects WHERE user_id=?", (str(user_id),)).fetchall()
+            rows = conn.execute(
+                "SELECT * FROM projects WHERE user_id=?", (str(user_id),)
+            ).fetchall()
         return [_row_to_project(row) for row in rows]
 
 
@@ -365,7 +403,7 @@ def _row_to_user(row: sqlite3.Row) -> User:
         telegram_id=row["telegram_id"],
         full_name=row["full_name"],
         username=row["username"],
-        phone_number=row["phone_number"] if "phone_number" in row.keys() else None,
+        phone_number=row["phone_number"] if "phone_number" in row else None,  # noqa: SIM401
         role=UserRole(row["role"]),
         status=UserStatus(row["status"]),
         created_at=datetime.fromisoformat(row["created_at"]),

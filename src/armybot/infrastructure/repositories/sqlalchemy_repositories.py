@@ -3,7 +3,14 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from armybot.domain.entities import Deployment, PhoneInvite, Project, User, UserCredential, UsernameInvite
+from armybot.domain.entities import (
+    Deployment,
+    PhoneInvite,
+    Project,
+    User,
+    UserCredential,
+    UsernameInvite,
+)
 from armybot.domain.enums import CredentialProvider, UserStatus
 from armybot.infrastructure.database.models import (
     DeploymentModel,
@@ -16,9 +23,9 @@ from armybot.infrastructure.database.models import (
 from armybot.infrastructure.repositories.mappers import (
     to_credential,
     to_deployment,
+    to_phone_invite,
     to_project,
     to_user,
-    to_phone_invite,
     to_username_invite,
 )
 
@@ -28,15 +35,21 @@ class SqlUserRepository:
         self.session = session
 
     async def get_by_telegram_id(self, telegram_id: int) -> User | None:
-        model = await self.session.scalar(select(UserModel).where(UserModel.telegram_id == telegram_id))
+        model = await self.session.scalar(
+            select(UserModel).where(UserModel.telegram_id == telegram_id)
+        )
         return to_user(model) if model else None
 
     async def get_by_username(self, username: str) -> User | None:
-        model = await self.session.scalar(select(UserModel).where(UserModel.username.ilike(username)))
+        model = await self.session.scalar(
+            select(UserModel).where(UserModel.username.ilike(username))
+        )
         return to_user(model) if model else None
 
     async def get_by_phone_number(self, phone_number: str) -> User | None:
-        model = await self.session.scalar(select(UserModel).where(UserModel.phone_number == phone_number))
+        model = await self.session.scalar(
+            select(UserModel).where(UserModel.phone_number == phone_number)
+        )
         return to_user(model) if model else None
 
     async def add(self, user: User) -> None:
@@ -74,7 +87,9 @@ class SqlUserRepository:
         return [to_user(row) for row in rows]
 
     async def delete_by_telegram_id(self, telegram_id: int) -> bool:
-        model = await self.session.scalar(select(UserModel).where(UserModel.telegram_id == telegram_id))
+        model = await self.session.scalar(
+            select(UserModel).where(UserModel.telegram_id == telegram_id)
+        )
         if model:
             await self.session.delete(model)
             await self.session.flush()
@@ -222,7 +237,9 @@ class SqlProjectRepository:
             await self.session.flush()
 
     async def list_for_user(self, user_id: UUID) -> list[Project]:
-        rows = await self.session.scalars(select(ProjectModel).where(ProjectModel.user_id == user_id))
+        rows = await self.session.scalars(
+            select(ProjectModel).where(ProjectModel.user_id == user_id)
+        )
         return [to_project(row) for row in rows]
 
 
@@ -244,7 +261,7 @@ class SqlDeploymentRepository:
                 deployment_metadata=deployment.metadata,
             )
         )
-        await self.session.flush()
+        await self.session.commit()
 
     async def update(self, deployment: Deployment) -> None:
         model = await self.session.get(DeploymentModel, deployment.id)
@@ -255,7 +272,7 @@ class SqlDeploymentRepository:
         model.live_url = deployment.live_url
         model.logs = deployment.logs
         model.deployment_metadata = deployment.metadata
-        await self.session.flush()
+        await self.session.commit()
 
     async def latest_for_user(self, user_id: UUID, limit: int = 10) -> list[Deployment]:
         rows = await self.session.scalars(

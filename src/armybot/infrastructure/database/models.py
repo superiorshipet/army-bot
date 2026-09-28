@@ -1,11 +1,26 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, String, Text, func
-from sqlalchemy import JSON
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    DateTime,
+    Enum,
+    ForeignKey,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
-from armybot.domain.enums import CredentialProvider, DeploymentStatus, ProjectStack, UserRole, UserStatus
+from armybot.domain.enums import (
+    CredentialProvider,
+    DeploymentStatus,
+    ProjectStack,
+    UserRole,
+    UserStatus,
+)
 from armybot.infrastructure.database.session import Base
 
 
@@ -40,6 +55,7 @@ class PhoneInviteModel(Base):
 
 class UserCredentialModel(Base):
     __tablename__ = "user_credentials"
+    __table_args__ = (UniqueConstraint("user_id", "provider", name="uq_user_credentials_provider"),)
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
@@ -58,6 +74,9 @@ class UserCredentialModel(Base):
 
 class ProjectModel(Base):
     __tablename__ = "projects"
+    __table_args__ = (
+        UniqueConstraint("user_id", "repo_url", "branch", name="uq_projects_repo_branch"),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
@@ -73,9 +92,13 @@ class DeploymentModel(Base):
     __tablename__ = "deployments"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    project_id: Mapped[UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    status: Mapped[DeploymentStatus] = mapped_column(Enum(DeploymentStatus, native_enum=False), index=True)
+    status: Mapped[DeploymentStatus] = mapped_column(
+        Enum(DeploymentStatus, native_enum=False), index=True
+    )
     branch: Mapped[str] = mapped_column(String(255), default="main")
     commit_sha: Mapped[str | None] = mapped_column(String(80), nullable=True)
     live_url: Mapped[str | None] = mapped_column(Text, nullable=True)

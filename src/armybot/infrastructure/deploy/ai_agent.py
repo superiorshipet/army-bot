@@ -14,11 +14,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-
-import httpx
 from collections.abc import Callable, Coroutine
 from typing import Any
 
+import httpx
 import structlog
 from google import genai
 from google.genai import types
@@ -236,7 +235,7 @@ class AIDeployAgent:
             )
             await self._log(on_log, "✅ Connected! AI is now deploying your project...")
             return await self._agent_loop(ssh, plan, credentials, on_log)
-        except Exception as exc:
+        except Exception:
             logger.exception("ai_deploy.failed")
             raise
         finally:
@@ -278,10 +277,19 @@ class AIDeployAgent:
                     break
                 except Exception as exc:
                     err_str = str(exc)
-                    if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+                    if (
+                        "429" in err_str
+                        or "RESOURCE_EXHAUSTED" in err_str
+                        or "quota" in err_str.lower()
+                    ):
                         wait_seconds = 8 + (attempt * 4)
-                        logger.warning("ai_deploy.rate_limit_wait", attempt=attempt, wait_seconds=wait_seconds)
-                        await self._log(on_log, f"⏳ Rate limit reached. Waiting {wait_seconds}s for quota cooldown...")
+                        logger.warning(
+                            "ai_deploy.rate_limit_wait", attempt=attempt, wait_seconds=wait_seconds
+                        )
+                        await self._log(
+                            on_log,
+                            f"⏳ Rate limit reached. Waiting {wait_seconds}s for quota cooldown...",
+                        )
                         await asyncio.sleep(wait_seconds)
                     else:
                         raise
@@ -293,17 +301,10 @@ class AIDeployAgent:
             model_content = response.candidates[0].content
             contents.append(model_content)
 
-            function_calls = [
-                part for part in (model_content.parts or []) if part.function_call
-            ]
-            text_parts = [
-                part.text
-                for part in (model_content.parts or [])
-                if part.text
-            ]
+            function_calls = [part for part in (model_content.parts or []) if part.function_call]
+            text_parts = [part.text for part in (model_content.parts or []) if part.text]
 
-            for text in text_parts:
-                logs.append(text)
+            logs.extend(text_parts)
 
             if not function_calls:
                 logs.append("AI finished without calling deployment_complete.")
@@ -357,9 +358,7 @@ class AIDeployAgent:
                         )
                     )
 
-            contents.append(
-                types.Content(role="user", parts=response_parts)
-            )
+            contents.append(types.Content(role="user", parts=response_parts))
             # Pacing delay to avoid exceeding free-tier requests-per-minute
             await asyncio.sleep(2.5)
 
@@ -386,9 +385,15 @@ class AIDeployAgent:
             extras.append(f"- **Cloudflare API Token**: `{cf_token}`")
             if cf_acc:
                 extras.append(f"- **Cloudflare Account ID**: `{cf_acc}`")
-            extras.append("- **Cloudflare Usage**: Configure DNS records, Cloudflare Tunnels, CDN cache, or R2 Object Storage.")
+            extras.append(
+                "- **Cloudflare Usage**: Configure DNS records, Cloudflare Tunnels, CDN cache, or R2 Object Storage."
+            )
 
-        extras_info = ("\n**Available Credentials & Integrations**:\n" + "\n".join(extras) + "\n") if extras else ""
+        extras_info = (
+            ("\n**Available Credentials & Integrations**:\n" + "\n".join(extras) + "\n")
+            if extras
+            else ""
+        )
 
         return (
             f"Deploy this project now. Do everything needed to make it live.\n\n"
@@ -421,8 +426,8 @@ class AIDeployAgent:
         if on_log is not None:
             try:
                 await on_log(message)
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001
+                logger.debug("deployment.progress_callback_failed")
 
 
 _GROQ_SYSTEM_PROMPT = """\
@@ -682,7 +687,6 @@ class GroqDeployAgent:
                 await asyncio.sleep(wait_seconds)
 
         raise RuntimeError(f"Groq deployment request failed after retries: {last_error}")
-
 
     @classmethod
     def _compact_messages(cls, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

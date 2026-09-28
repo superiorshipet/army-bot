@@ -1,5 +1,4 @@
 import asyncio
-from pathlib import Path
 
 from armybot.domain.entities import DeploymentPlan
 from armybot.shared.settings import settings
@@ -13,9 +12,11 @@ class SafeDeploymentExecutor:
     implement the same DeploymentExecutor port without changing application code.
     """
 
-    async def deploy(self, plan: DeploymentPlan, credentials: dict[str, dict], on_log=None) -> tuple[str | None, list[str]]:
+    async def deploy(
+        self, plan: DeploymentPlan, credentials: dict[str, dict], on_log=None
+    ) -> tuple[str | None, list[str]]:
         logs = [
-            f"Project: {plan.project_name}",
+            f"Project: {plan.deployment_name}",
             f"Branch: {plan.branch}",
             f"Stack: {plan.stack.value}",
             f"Build steps: {', '.join(plan.build_steps)}",
@@ -33,7 +34,7 @@ class SafeDeploymentExecutor:
 
     async def _run_local_steps(self, plan: DeploymentPlan) -> list[str]:
         logs: list[str] = []
-        workdir = settings.workspace_root / plan.project_name
+        workdir = settings.workspace_root / plan.deployment_name
         for step in plan.build_steps:
             command = step.split()
             logs.append(f"Running: {step}")
@@ -55,4 +56,4 @@ class SafeDeploymentExecutor:
         base_url = server.get("public_base_url") or settings.public_base_url
         if not base_url:
             return None
-        return f"{base_url.rstrip('/')}/{plan.project_name}/"
+        return f"{base_url.rstrip('/')}/{plan.deployment_name}/"

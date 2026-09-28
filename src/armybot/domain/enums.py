@@ -26,6 +26,7 @@ class DeploymentStatus(StrEnum):
     Running = "running"
     Successful = "successful"
     Failed = "failed"
+    Cancelled = "cancelled"
     RolledBack = "rolled_back"
 
 

@@ -1,10 +1,14 @@
 from uuid import UUID
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 
 from armybot.domain.entities import Project, User
 from armybot.domain.enums import CredentialProvider
-
 
 REQUIRED_CREDENTIALS = (
     CredentialProvider.GitHub,
@@ -24,7 +28,9 @@ def access_decision_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def main_menu_keyboard(is_admin: bool = False, has_server_cred: bool = False) -> InlineKeyboardMarkup:
+def main_menu_keyboard(
+    is_admin: bool = False, has_server_cred: bool = False
+) -> InlineKeyboardMarkup:
     top_row = [InlineKeyboardButton(text="Setup credentials", callback_data="menu:setup")]
     if has_server_cred:
         top_row.append(InlineKeyboardButton(text="Deploy project", callback_data="menu:deploy"))
@@ -74,12 +80,14 @@ def rejected_users_keyboard(users: list[User]) -> InlineKeyboardMarkup:
         label = user.full_name or user.username or str(user.telegram_id)
         if len(label) > 16:
             label = label[:14] + ".."
-        rows.append([
-            InlineKeyboardButton(
-                text=f"🔄 Un-reject {label}",
-                callback_data=f"admin:unreject:{user.telegram_id}",
-            )
-        ])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"🔄 Un-reject {label}",
+                    callback_data=f"admin:unreject:{user.telegram_id}",
+                )
+            ]
+        )
     rows.append([InlineKeyboardButton(text="⬅️ Back to Admin panel", callback_data="menu:admin")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -88,10 +96,19 @@ def setup_keyboard(saved_providers: set[CredentialProvider]) -> InlineKeyboardMa
     rows: list[list[InlineKeyboardButton]] = []
     missing = [provider for provider in REQUIRED_CREDENTIALS if provider not in saved_providers]
     for provider in missing:
-        rows.append([InlineKeyboardButton(text=f"Add {provider_label(provider)}", callback_data=f"cred:add:{provider.value}")])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"Add {provider_label(provider)}",
+                    callback_data=f"cred:add:{provider.value}",
+                )
+            ]
+        )
 
     edit_buttons = [
-        InlineKeyboardButton(text=f"Edit {provider_label(provider)}", callback_data=f"cred:edit:{provider.value}")
+        InlineKeyboardButton(
+            text=f"Edit {provider_label(provider)}", callback_data=f"cred:edit:{provider.value}"
+        )
         for provider in sorted(saved_providers, key=lambda item: item.value)
     ]
     for button in edit_buttons:
@@ -123,10 +140,16 @@ def provider_label(provider: CredentialProvider) -> str:
 def projects_list_keyboard(projects: list[Project]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for project in projects:
-        rows.append([
-            InlineKeyboardButton(text=f"📦 {project.name}", callback_data=f"project:view:{project.id}"),
-            InlineKeyboardButton(text="🗑️ Delete", callback_data=f"project:del_prompt:{project.id}"),
-        ])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"📦 {project.name}", callback_data=f"project:view:{project.id}"
+                ),
+                InlineKeyboardButton(
+                    text="🗑️ Delete", callback_data=f"project:del_prompt:{project.id}"
+                ),
+            ]
+        )
     rows.append([InlineKeyboardButton(text="Back to menu", callback_data="menu:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -136,7 +159,11 @@ def project_details_keyboard(project: Project) -> InlineKeyboardMarkup:
     actions: list[InlineKeyboardButton] = []
     if project.live_url:
         actions.append(InlineKeyboardButton(text="🌐 Open Site", url=project.live_url))
-    actions.append(InlineKeyboardButton(text="🗑️ Delete Project", callback_data=f"project:del_prompt:{project.id}"))
+    actions.append(
+        InlineKeyboardButton(
+            text="🗑️ Delete Project", callback_data=f"project:del_prompt:{project.id}"
+        )
+    )
     rows.append(actions)
     rows.append([InlineKeyboardButton(text="⬅️ Back to Projects", callback_data="menu:projects")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -146,9 +173,25 @@ def project_delete_confirm_keyboard(project_id: UUID | str) -> InlineKeyboardMar
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="✅ Yes, Delete Project", callback_data=f"project:del_confirm:{project_id}"),
-                InlineKeyboardButton(text="❌ Cancel", callback_data=f"project:del_cancel:{project_id}"),
+                InlineKeyboardButton(
+                    text="✅ Yes, Delete Project", callback_data=f"project:del_confirm:{project_id}"
+                ),
+                InlineKeyboardButton(
+                    text="❌ Cancel", callback_data=f"project:del_cancel:{project_id}"
+                ),
             ]
         ]
     )
 
+
+def cancel_deployment_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Cancel deployment",
+                    callback_data="deployment:cancel",
+                )
+            ]
+        ]
+    )

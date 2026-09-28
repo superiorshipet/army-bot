@@ -1,12 +1,14 @@
-import pytest
 from uuid import uuid4
 
+import pytest
+
+from armybot.application.use_cases.access import AccessService
 from armybot.domain.entities import User
 from armybot.domain.enums import UserRole, UserStatus
 from armybot.infrastructure.database.sqlite_store import SqliteStore, SqliteUserRepository
-from armybot.application.use_cases.access import AccessService
 from armybot.presentation.telegram.keyboards import (
     admin_panel_keyboard,
+    cancel_deployment_keyboard,
     main_menu_keyboard,
     rejected_users_keyboard,
 )
@@ -85,6 +87,14 @@ async def test_access_service_rejected_and_unreject(tmp_path):
     assert await user_repo.get_by_telegram_id(222) is None
 
     # Now user can send /start again cleanly
-    user_again, created_again = await access.start_or_request_access(222, "Test Person", "testperson")
+    user_again, created_again = await access.start_or_request_access(
+        222, "Test Person", "testperson"
+    )
     assert created_again is True
     assert user_again.status == UserStatus.Pending
+
+
+def test_cancel_deployment_keyboard_callback() -> None:
+    keyboard = cancel_deployment_keyboard()
+
+    assert keyboard.inline_keyboard[0][0].callback_data == "deployment:cancel"

@@ -15,6 +15,7 @@ from armybot.infrastructure.database.sqlite_store import (
     SqliteUserRepository,
 )
 from armybot.infrastructure.deploy.analyzer import FilesystemRepoAnalyzer
+from armybot.infrastructure.deploy.coordinator import deployment_coordinator
 from armybot.infrastructure.deploy.executor import SafeDeploymentExecutor
 from armybot.infrastructure.repositories.sqlalchemy_repositories import (
     SqlCredentialRepository,
@@ -71,6 +72,7 @@ class RequestContainer:
             projects=self.projects,
             deployments=self.deployments,
             credentials=self.credentials,
+            coordinator=deployment_coordinator,
         )
 
 
@@ -93,6 +95,7 @@ async def container_scope() -> AsyncIterator[RequestContainer]:
             projects=container.projects,
             deployments=container.deployments,
             credentials=container.credentials,
+            coordinator=deployment_coordinator,
         )
         yield container
         return

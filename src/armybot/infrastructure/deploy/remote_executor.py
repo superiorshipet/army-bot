@@ -5,11 +5,16 @@ import re
 from collections.abc import Callable, Coroutine
 from typing import Any
 
+import structlog
+
 from armybot.domain.entities import DeploymentPlan
 from armybot.domain.enums import ProjectStack
+from armybot.infrastructure.deploy.recipe_support import common_git_prep
 from armybot.infrastructure.deploy.ssh_client import SSHClient
 
 LogCallback = Callable[[str], Coroutine[Any, Any, None]] | None
+
+logger = structlog.get_logger()
 
 
 class RemoteRecipeDeployExecutor:
@@ -45,7 +50,7 @@ class RemoteRecipeDeployExecutor:
         else:
             script = self._universal_script(plan, server, live_url)
 
-        command = self._remote_script_command(plan.project_name, script)
+        command = self._remote_script_command(plan.deployment_name, script)
 
         ssh = SSHClient(command_timeout=self.command_timeout)
         try:
@@ -90,6 +95,7 @@ class RemoteRecipeDeployExecutor:
 
         base_path = server.get("base_path", "/var/www").rstrip("/")
         app_dir = f"{base_path}/{safe_name}"
+        project_root = f"{base_path}/.army-projects/{safe_name}"
         service_name = f"army-{safe_name}"
         nginx_name = f"army-{safe_name}"
 
@@ -109,6 +115,9 @@ sudo nginx -t 2>/dev/null && sudo systemctl reload nginx 2>/dev/null || true
 echo "[3/4] Removing project files..."
 if [ -d "{app_dir}" ] && [ "{app_dir}" != "/var/www" ] && [ "{app_dir}" != "/" ]; then
   sudo rm -rf "{app_dir}"
+fi
+if [ -d "{project_root}" ] && [ "{project_root}" != "/" ]; then
+  sudo rm -rf "{project_root}"
 fi
 rm -f "/tmp/army-recipe-{safe_name}.sh" "/tmp/army-recipe-del-{safe_name}.sh"
 
@@ -138,122 +147,15 @@ echo "[4/4] Project {safe_name} completely removed from server."
         return logs
 
     @staticmethod
-    def _common_git_prep(project: str, repo_url: str, branch: str, base_path: str, app_path: str) -> str:
-        return f"""
-PROJECT='{project}'
-REPO_URL='{repo_url}'
-BRANCH='{branch}'
-BASE_PATH='{base_path}'
-APP_DIR="$BASE_PATH/$PROJECT"
-APP_PATH='{app_path}'
-BUILD_DIR="$APP_DIR/$APP_PATH"
-
-echo "[1/7] Preparing directories"
-sudo mkdir -p "$BASE_PATH"
-sudo chown "$USER":"$USER" "$BASE_PATH"
-git config --global --add safe.directory "*" 2>/dev/null || true
-sudo git config --global --add safe.directory "*" 2>/dev/null || true
-
-if [ -d "$APP_DIR" ]; then
-  sudo chown -R "$USER":"$USER" "$APP_DIR" 2>/dev/null || true
-fi
-
-if [ -d "$APP_DIR/.git" ]; then
-  echo "[2/7] Updating repository"
-  cd "$APP_DIR"
-  if git fetch origin "$BRANCH"; then
-    git reset --hard "origin/$BRANCH"
-  else
-    git fetch origin || true
-    DEFAULT_BRANCH=$(git remote show origin 2>/dev/null | sed -n '/HEAD branch/s/.*: //p' || echo "master")
-    git reset --hard "origin/$DEFAULT_BRANCH" 2>/dev/null || git pull || true
-  fi
-else
-  echo "[2/7] Cloning repository"
-  rm -rf "$APP_DIR"
-  if ! git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$APP_DIR"; then
-    echo "Branch $BRANCH not found, cloning default branch..."
-    git clone --depth 1 "$REPO_URL" "$APP_DIR"
-  fi
-  cd "$APP_DIR"
-fi
-
-if [ ! -d "$BUILD_DIR" ]; then
-  echo "Configured app path does not exist: $APP_PATH" >&2
-  exit 19
-fi
-
-# Prepare .env file if missing
-if [ ! -f "$APP_DIR/.env" ]; then
-  if [ -f "$APP_DIR/.env.example" ]; then
-    cp "$APP_DIR/.env.example" "$APP_DIR/.env"
-  elif [ -f "$BUILD_DIR/.env.example" ]; then
-    cp "$BUILD_DIR/.env.example" "$APP_DIR/.env"
-  else
-    touch "$APP_DIR/.env"
-  fi
-fi
-
-# Auto-inject AI keys from host if available
-if sudo test -f /etc/army_deploy_bot.env 2>/dev/null; then
-  for k in GROQ_API_KEY OPENAI_API_KEY; do
-    if ! grep -q "^\\$k=" "$APP_DIR/.env" 2>/dev/null; then
-      v=$(sudo grep "^\\$k=" /etc/army_deploy_bot.env 2>/dev/null | cut -d'=' -f2- || true)
-      if [ -n "$v" ]; then
-        echo "\\$k=$v" >> "$APP_DIR/.env"
-      fi
-    fi
-  done
-fi
-
-# Auto-provision PostgreSQL database if project uses Postgres
-DB_ROLE=$(echo "{project}" | tr '-' '_' | tr '.' '_')
-if grep -rqi "postgresql\\|npgsql\\|psycopg\\|postgres:\\|pg_hba" "$APP_DIR" --exclude-dir=".git" --exclude-dir="node_modules" --exclude-dir=".venv" 2>/dev/null; then
-  sudo -u postgres psql -c "DO \\$\\$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '$DB_ROLE') THEN CREATE ROLE $DB_ROLE WITH LOGIN PASSWORD 'pass_$DB_ROLE'; END IF; END \\$\\$;" 2>/dev/null || true
-  sudo -u postgres psql -c "SELECT 1 FROM pg_database WHERE datname = '$DB_ROLE'" 2>/dev/null | grep -q 1 || sudo -u postgres psql -c "CREATE DATABASE $DB_ROLE OWNER $DB_ROLE;" 2>/dev/null || true
-  sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE $DB_ROLE TO $DB_ROLE;" 2>/dev/null || true
-  if ! grep -q "^DATABASE_URL=" "$APP_DIR/.env" 2>/dev/null; then
-    echo "DATABASE_URL=postgresql://$DB_ROLE:pass_$DB_ROLE@localhost:5432/$DB_ROLE" >> "$APP_DIR/.env"
-  fi
-fi
-
-# Auto-inject Redis URL if redis is referenced
-if grep -rqi "redis" "$APP_DIR" --exclude-dir=".git" --exclude-dir="node_modules" --exclude-dir=".venv" 2>/dev/null; then
-  if ! grep -q "^REDIS_URL=" "$APP_DIR/.env" 2>/dev/null; then
-    echo "REDIS_URL=localhost:6379" >> "$APP_DIR/.env"
-  fi
-fi
-
-# Auto-inject MongoDB URI if mongodb is referenced
-if grep -rqi "mongodb\\|mongoose" "$APP_DIR" --exclude-dir=".git" --exclude-dir="node_modules" 2>/dev/null; then
-  sudo systemctl is-active mongod >/dev/null 2>&1 || sudo systemctl start mongod 2>/dev/null || true
-  if ! grep -q "^MONGO_URI=" "$APP_DIR/.env" 2>/dev/null; then
-    echo "MONGO_URI=mongodb://127.0.0.1:27017/$DB_ROLE" >> "$APP_DIR/.env"
-  fi
-  if ! grep -q "^MONGODB_URI=" "$APP_DIR/.env" 2>/dev/null; then
-    echo "MONGODB_URI=mongodb://127.0.0.1:27017/$DB_ROLE" >> "$APP_DIR/.env"
-  fi
-fi
-
-# Auto-inject JWT_SECRET if referenced or empty
-if grep -rqi "JWT_SECRET" "$APP_DIR" --exclude-dir=".git" --exclude-dir="node_modules" 2>/dev/null; then
-  if ! grep -q "^JWT_SECRET=[a-zA-Z0-9]" "$APP_DIR/.env" 2>/dev/null; then
-    sed -i '/^JWT_SECRET=/d' "$APP_DIR/.env" 2>/dev/null || true
-    echo "JWT_SECRET=$(openssl rand -hex 32)" >> "$APP_DIR/.env"
-  fi
-fi
-
-for subenv in "$APP_DIR/server" "$APP_DIR/backend" "$APP_DIR/api"; do
-  if [ -d "$subenv" ] && [ -f "$APP_DIR/.env" ]; then
-    cp "$APP_DIR/.env" "$subenv/.env" 2>/dev/null || true
-  fi
-done
-"""
+    def _common_git_prep(
+        project: str, repo_url: str, branch: str, base_path: str, app_path: str
+    ) -> str:
+        return common_git_prep(project, repo_url, branch, base_path, app_path)
 
     @staticmethod
     def _static_site_script(plan: DeploymentPlan, server: dict, live_url: str) -> str:
         base_path = server.get("base_path", "/var/www")
-        project = RemoteRecipeDeployExecutor._safe_name(plan.project_name)
+        project = RemoteRecipeDeployExecutor._safe_name(plan.deployment_name)
         route_prefix = f"/{project}/"
         route_clean = f"/{project}"
         repo_url = plan.repo_url.replace("'", "'\\''")
@@ -262,7 +164,9 @@ done
         app_entry = plan.app_entry.replace("'", "'\\''") or "index.html"
         nginx_name = f"army-{project}"
 
-        prep = RemoteRecipeDeployExecutor._common_git_prep(project, repo_url, branch, base_path, app_path)
+        prep = RemoteRecipeDeployExecutor._common_git_prep(
+            project, repo_url, branch, base_path, app_path
+        )
 
         return f"""#!/usr/bin/env bash
 set -euo pipefail
@@ -338,6 +242,7 @@ sudo systemctl reload nginx
 echo "[7/7] Verifying public URL"
 curl -k -L --fail --max-time 30 "$LIVE_URL" >/dev/null || curl -k -L --max-time 10 "http://127.0.0.1$ROUTE_PREFIX" >/dev/null || true
 
+finalize_release
 echo "Deployment complete: $LIVE_URL"
 """
 
@@ -461,7 +366,7 @@ PYEOF"""
     @staticmethod
     def _node_site_script(plan: DeploymentPlan, server: dict, live_url: str) -> str:
         base_path = server.get("base_path", "/var/www")
-        project = RemoteRecipeDeployExecutor._safe_name(plan.project_name)
+        project = RemoteRecipeDeployExecutor._safe_name(plan.deployment_name)
         route_prefix = f"/{project}/"
         route_clean = f"/{project}"
         repo_url = plan.repo_url.replace("'", "'\\''")
@@ -470,7 +375,9 @@ PYEOF"""
         nginx_name = f"army-{project}"
         service_name = f"army-{project}"
 
-        prep = RemoteRecipeDeployExecutor._common_git_prep(project, repo_url, branch, base_path, app_path)
+        prep = RemoteRecipeDeployExecutor._common_git_prep(
+            project, repo_url, branch, base_path, app_path
+        )
 
         return f"""#!/usr/bin/env bash
 set -euo pipefail
@@ -484,11 +391,11 @@ LIVE_URL='{live_url}'
 cd "$BUILD_DIR"
 
 # Allocate or reuse a persistent port for this project
-if [ -f "$APP_DIR/.port" ]; then
-  PORT=$(cat "$APP_DIR/.port")
+if [ -f "$SHARED_DIR/.port" ]; then
+  PORT=$(cat "$SHARED_DIR/.port")
 else
   PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()')
-  echo "$PORT" > "$APP_DIR/.port"
+  echo "$PORT" > "$SHARED_DIR/.port"
 fi
 
 echo "[3/7] Installing Node dependencies"
@@ -703,13 +610,14 @@ echo "[7/7] Verifying service and public URL"
 sleep 3
 curl -k -L --fail --max-time 30 "$LIVE_URL" >/dev/null || curl -k -L --max-time 10 "http://127.0.0.1:$PORT$ROUTE_CLEAN" >/dev/null || curl -k -L --max-time 10 "http://127.0.0.1:$PORT/" >/dev/null || true
 
+finalize_release
 echo "Deployment complete: $LIVE_URL"
 """
 
     @staticmethod
     def _python_site_script(plan: DeploymentPlan, server: dict, live_url: str) -> str:
         base_path = server.get("base_path", "/var/www")
-        project = RemoteRecipeDeployExecutor._safe_name(plan.project_name)
+        project = RemoteRecipeDeployExecutor._safe_name(plan.deployment_name)
         route_prefix = f"/{project}/"
         route_clean = f"/{project}"
         repo_url = plan.repo_url.replace("'", "'\\''")
@@ -718,7 +626,9 @@ echo "Deployment complete: $LIVE_URL"
         nginx_name = f"army-{project}"
         service_name = f"army-{project}"
 
-        prep = RemoteRecipeDeployExecutor._common_git_prep(project, repo_url, branch, base_path, app_path)
+        prep = RemoteRecipeDeployExecutor._common_git_prep(
+            project, repo_url, branch, base_path, app_path
+        )
 
         return f"""#!/usr/bin/env bash
 set -euo pipefail
@@ -731,11 +641,11 @@ LIVE_URL='{live_url}'
 
 cd "$BUILD_DIR"
 
-if [ -f "$APP_DIR/.port" ]; then
-  PORT=$(cat "$APP_DIR/.port")
+if [ -f "$SHARED_DIR/.port" ]; then
+  PORT=$(cat "$SHARED_DIR/.port")
 else
   PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()')
-  echo "$PORT" > "$APP_DIR/.port"
+  echo "$PORT" > "$SHARED_DIR/.port"
 fi
 
 echo "[3/7] Setting up Python virtual environment"
@@ -977,14 +887,14 @@ echo "[7/7] Verifying public URL"
 sleep 3
 curl -k -L --fail --max-time 30 "$LIVE_URL" >/dev/null || curl -k -L --max-time 10 "http://127.0.0.1:$PORT/" >/dev/null || true
 
+finalize_release
 echo "Deployment complete: $LIVE_URL"
 """
-
 
     @staticmethod
     def _spring_boot_site_script(plan: DeploymentPlan, server: dict, live_url: str) -> str:
         base_path = server.get("base_path", "/var/www")
-        project = RemoteRecipeDeployExecutor._safe_name(plan.project_name)
+        project = RemoteRecipeDeployExecutor._safe_name(plan.deployment_name)
         route_prefix = f"/{project}/"
         route_clean = f"/{project}"
         repo_url = plan.repo_url.replace("'", "'\\''")
@@ -993,7 +903,9 @@ echo "Deployment complete: $LIVE_URL"
         nginx_name = f"army-{project}"
         service_name = f"army-{project}"
 
-        prep = RemoteRecipeDeployExecutor._common_git_prep(project, repo_url, branch, base_path, app_path)
+        prep = RemoteRecipeDeployExecutor._common_git_prep(
+            project, repo_url, branch, base_path, app_path
+        )
 
         return f"""#!/usr/bin/env bash
 set -euo pipefail
@@ -1006,11 +918,11 @@ LIVE_URL='{live_url}'
 
 cd "$BUILD_DIR"
 
-if [ -f "$APP_DIR/.port" ]; then
-  PORT=$(cat "$APP_DIR/.port")
+if [ -f "$SHARED_DIR/.port" ]; then
+  PORT=$(cat "$SHARED_DIR/.port")
 else
   PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()')
-  echo "$PORT" > "$APP_DIR/.port"
+  echo "$PORT" > "$SHARED_DIR/.port"
 fi
 
 echo "[3/7] Ensuring Java runtime is available"
@@ -1097,11 +1009,11 @@ location = $ROUTE_CLEAN {{
 location ^~ $ROUTE_PREFIX {{
     proxy_pass http://127.0.0.1:$PORT$ROUTE_PREFIX;
     proxy_http_version 1.1;
-    proxy_set_header Host \$http_host;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Host \\$http_host;
+    proxy_set_header X-Real-IP \\$remote_addr;
+    proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \\$scheme;
+    proxy_set_header Upgrade \\$http_upgrade;
     proxy_set_header Connection "upgrade";
     proxy_read_timeout 120;
 }}
@@ -1114,13 +1026,14 @@ echo "[7/7] Verifying service and public URL"
 sleep 5
 curl -k -L --fail --max-time 30 "$LIVE_URL" >/dev/null || curl -k -L --max-time 10 "http://127.0.0.1:$PORT$ROUTE_CLEAN/" >/dev/null || true
 
+finalize_release
 echo "Deployment complete: $LIVE_URL"
 """
 
     @staticmethod
     def _dotnet_site_script(plan: DeploymentPlan, server: dict, live_url: str) -> str:
         base_path = server.get("base_path", "/var/www")
-        project = RemoteRecipeDeployExecutor._safe_name(plan.project_name)
+        project = RemoteRecipeDeployExecutor._safe_name(plan.deployment_name)
         route_prefix = f"/{project}/"
         route_clean = f"/{project}"
         repo_url = plan.repo_url.replace("'", "'\\''")
@@ -1129,7 +1042,9 @@ echo "Deployment complete: $LIVE_URL"
         nginx_name = f"army-{project}"
         service_name = f"army-{project}"
 
-        prep = RemoteRecipeDeployExecutor._common_git_prep(project, repo_url, branch, base_path, app_path)
+        prep = RemoteRecipeDeployExecutor._common_git_prep(
+            project, repo_url, branch, base_path, app_path
+        )
 
         return f"""#!/usr/bin/env bash
 set -euo pipefail
@@ -1142,11 +1057,11 @@ LIVE_URL='{live_url}'
 
 cd "$BUILD_DIR"
 
-if [ -f "$APP_DIR/.port" ]; then
-  PORT=$(cat "$APP_DIR/.port")
+if [ -f "$SHARED_DIR/.port" ]; then
+  PORT=$(cat "$SHARED_DIR/.port")
 else
   PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()')
-  echo "$PORT" > "$APP_DIR/.port"
+  echo "$PORT" > "$SHARED_DIR/.port"
 fi
 
 echo "[3/7] Restoring .NET dependencies"
@@ -1348,13 +1263,14 @@ echo "[7/7] Verifying public URL"
 sleep 3
 curl -k -L --fail --max-time 30 "$LIVE_URL" >/dev/null || curl -k -L --max-time 10 "http://127.0.0.1:$PORT/" >/dev/null || true
 
+finalize_release
 echo "Deployment complete: $LIVE_URL"
 """
 
     @staticmethod
     def _laravel_site_script(plan: DeploymentPlan, server: dict, live_url: str) -> str:
         base_path = server.get("base_path", "/var/www")
-        project = RemoteRecipeDeployExecutor._safe_name(plan.project_name)
+        project = RemoteRecipeDeployExecutor._safe_name(plan.deployment_name)
         route_prefix = f"/{project}/"
         route_clean = f"/{project}"
         repo_url = plan.repo_url.replace("'", "'\\''")
@@ -1362,7 +1278,9 @@ echo "Deployment complete: $LIVE_URL"
         app_path = plan.app_path.replace("'", "'\\''")
         nginx_name = f"army-{project}"
 
-        prep = RemoteRecipeDeployExecutor._common_git_prep(project, repo_url, branch, base_path, app_path)
+        prep = RemoteRecipeDeployExecutor._common_git_prep(
+            project, repo_url, branch, base_path, app_path
+        )
 
         return f"""#!/usr/bin/env bash
 set -euo pipefail
@@ -1421,6 +1339,7 @@ sudo systemctl reload nginx
 echo "[7/7] Verifying public URL"
 curl -k -L --fail --max-time 30 "$LIVE_URL" >/dev/null || curl -k -L --max-time 10 "http://127.0.0.1/" >/dev/null || true
 
+finalize_release
 echo "Deployment complete: $LIVE_URL"
 """
 
@@ -1428,7 +1347,7 @@ echo "Deployment complete: $LIVE_URL"
     def _universal_script(plan: DeploymentPlan, server: dict, live_url: str) -> str:
         """Fallback script that auto-detects stack directly on the cloned files."""
         base_path = server.get("base_path", "/var/www")
-        project = RemoteRecipeDeployExecutor._safe_name(plan.project_name)
+        project = RemoteRecipeDeployExecutor._safe_name(plan.deployment_name)
         route_prefix = f"/{project}/"
         route_clean = f"/{project}"
         repo_url = plan.repo_url.replace("'", "'\\''")
@@ -1436,7 +1355,9 @@ echo "Deployment complete: $LIVE_URL"
         app_path = plan.app_path.replace("'", "'\\''")
         nginx_name = f"army-{project}"
 
-        prep = RemoteRecipeDeployExecutor._common_git_prep(project, repo_url, branch, base_path, app_path)
+        prep = RemoteRecipeDeployExecutor._common_git_prep(
+            project, repo_url, branch, base_path, app_path
+        )
 
         return f"""#!/usr/bin/env bash
 set -euo pipefail
@@ -1483,6 +1404,7 @@ NGINX
 sudo nginx -t
 sudo systemctl reload nginx
 
+finalize_release
 echo "Deployment complete: $LIVE_URL"
 """
 
@@ -1491,18 +1413,16 @@ echo "Deployment complete: $LIVE_URL"
         safe_name = RemoteRecipeDeployExecutor._safe_name(project_name)
         encoded = base64.b64encode(script.encode()).decode()
         path = f"/tmp/army-recipe-{safe_name}.sh"
-        return (
-            f"printf '%s' '{encoded}' | base64 -d > {path} && "
-            f"chmod +x {path} && "
-            f"bash {path}"
-        )
+        return f"printf '%s' '{encoded}' | base64 -d > {path} && chmod +x {path} && bash {path}"
 
     @staticmethod
     def _live_url(plan: DeploymentPlan, server: dict) -> str:
         base_url = server.get("public_base_url")
         if not base_url:
             raise ValueError("Server public_base_url is required for recipe deployments.")
-        return f"{base_url.rstrip('/')}/{RemoteRecipeDeployExecutor._safe_name(plan.project_name)}/"
+        return (
+            f"{base_url.rstrip('/')}/{RemoteRecipeDeployExecutor._safe_name(plan.deployment_name)}/"
+        )
 
     @staticmethod
     def _safe_name(name: str) -> str:
@@ -1523,5 +1443,5 @@ echo "Deployment complete: $LIVE_URL"
             return
         try:
             await on_log(message)
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001
+            logger.debug("deployment.progress_callback_failed")

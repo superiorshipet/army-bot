@@ -19,10 +19,12 @@ def test_node_site_script_contains_nextjs_support():
         "base_path": "/var/www",
         "public_base_url": "https://example.com",
     }
-    script = RemoteRecipeDeployExecutor._node_site_script(plan, server, "https://example.com/my-next-app/")
+    script = RemoteRecipeDeployExecutor._node_site_script(
+        plan, server, "https://example.com/my-next-app/"
+    )
 
     assert "IS_NEXT=false" in script
-    assert 'grep -q \'"next"\' package.json' in script
+    assert "grep -q '\"next\"' package.json" in script
     assert "proxy_pass http://127.0.0.1:$PORT;" in script
     assert "basePath" in script
 
@@ -43,7 +45,9 @@ def test_static_site_script_contains_vite_base():
         "base_path": "/var/www",
         "public_base_url": "https://example.com",
     }
-    script = RemoteRecipeDeployExecutor._static_site_script(plan, server, "https://example.com/my-vite-app/")
+    script = RemoteRecipeDeployExecutor._static_site_script(
+        plan, server, "https://example.com/my-vite-app/"
+    )
 
     assert '--base="$ROUTE_PREFIX"' in script
 
@@ -64,7 +68,9 @@ def test_dotnet_site_script_contains_frontend_support():
         "base_path": "/var/www",
         "public_base_url": "https://example.com",
     }
-    script = RemoteRecipeDeployExecutor._dotnet_site_script(plan, server, "https://example.com/my-dotnet-app/")
+    script = RemoteRecipeDeployExecutor._dotnet_site_script(
+        plan, server, "https://example.com/my-dotnet-app/"
+    )
 
     assert "CLIENT_DIR=" in script
     assert "Building frontend client in $CLIENT_DIR" in script
@@ -89,7 +95,9 @@ def test_python_site_script_contains_frontend_support():
         "base_path": "/var/www",
         "public_base_url": "https://example.com",
     }
-    script = RemoteRecipeDeployExecutor._python_site_script(plan, server, "https://example.com/my-fastapi-app/")
+    script = RemoteRecipeDeployExecutor._python_site_script(
+        plan, server, "https://example.com/my-fastapi-app/"
+    )
 
     assert "CLIENT_DIR=" in script
     assert "Building frontend client in $CLIENT_DIR" in script
@@ -99,9 +107,12 @@ def test_python_site_script_contains_frontend_support():
 
 
 def test_common_git_prep_contains_db_and_env():
-    prep = RemoteRecipeDeployExecutor._common_git_prep("test-proj", "https://github.com/ex/test", "main", "/var/www", ".")
+    prep = RemoteRecipeDeployExecutor._common_git_prep(
+        "test-proj", "https://github.com/ex/test", "main", "/var/www", "."
+    )
     assert "DATABASE_URL=" in prep
-    assert "GROQ_API_KEY" in prep
+    assert "GROQ_API_KEY" not in prep
+    assert "/etc/army_deploy_bot.env" not in prep
     assert "CREATE DATABASE" in prep
     assert "systemctl is-active mongod" in prep
 
@@ -122,7 +133,9 @@ def test_node_site_script_contains_asset_normalization_and_prisma():
         "base_path": "/var/www",
         "public_base_url": "https://example.com",
     }
-    script = RemoteRecipeDeployExecutor._node_site_script(plan, server, "https://example.com/my-node-app/")
+    script = RemoteRecipeDeployExecutor._node_site_script(
+        plan, server, "https://example.com/my-node-app/"
+    )
     assert "prisma db push" in script
     assert "route_prefix = sys.argv[2]" in script
     assert "images/" in script
@@ -144,7 +157,9 @@ def test_static_site_script_contains_asset_normalization():
         "base_path": "/var/www",
         "public_base_url": "https://example.com",
     }
-    script = RemoteRecipeDeployExecutor._static_site_script(plan, server, "https://example.com/my-static-app/")
+    script = RemoteRecipeDeployExecutor._static_site_script(
+        plan, server, "https://example.com/my-static-app/"
+    )
     assert "route_prefix = sys.argv[2]" in script
     assert "images/" in script
 
@@ -173,9 +188,7 @@ def test_all_scripts_pass_bash_syntax_check():
         RemoteRecipeDeployExecutor._universal_script,
     ]:
         script = func(plan, server, "https://example.com/my-app/")
-        p = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
+        p = subprocess.run(
+            ["bash", "-n"], input=script, text=True, capture_output=True, check=False
+        )
         assert p.returncode == 0, f"Bash syntax error in {func.__name__}:\n{p.stderr}"
-
-
-
-

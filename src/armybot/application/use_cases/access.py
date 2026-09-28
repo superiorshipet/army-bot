@@ -56,7 +56,9 @@ class AccessService:
             existing.full_name = full_name or existing.full_name
             existing.username = username or existing.username
             existing.phone_number = _normalize_phone(phone_number) or existing.phone_number
-            existing.role = UserRole.SuperAdmin if telegram_id in self.super_admin_ids else UserRole.User
+            existing.role = (
+                UserRole.SuperAdmin if telegram_id in self.super_admin_ids else UserRole.User
+            )
             existing.status = UserStatus.Active
             await self.users.update(existing)
             return existing
@@ -73,7 +75,9 @@ class AccessService:
         await self.users.add(user)
         return user
 
-    async def add_allowed_username(self, username: str, full_name: str | None = None) -> User | UsernameInvite:
+    async def add_allowed_username(
+        self, username: str, full_name: str | None = None
+    ) -> User | UsernameInvite:
         normalized = _normalize_username(username)
         if not normalized:
             raise ValueError("Username is required.")
@@ -89,7 +93,9 @@ class AccessService:
         await self.users.add_username_invite(invite)
         return invite
 
-    async def add_allowed_phone(self, phone_number: str, full_name: str | None = None) -> User | PhoneInvite:
+    async def add_allowed_phone(
+        self, phone_number: str, full_name: str | None = None
+    ) -> User | PhoneInvite:
         normalized = _normalize_phone(phone_number)
         if not normalized:
             raise ValueError("Phone number is required.")

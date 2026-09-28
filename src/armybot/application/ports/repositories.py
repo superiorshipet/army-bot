@@ -1,7 +1,14 @@
 from typing import Protocol
 from uuid import UUID
 
-from armybot.domain.entities import Deployment, PhoneInvite, Project, User, UserCredential, UsernameInvite
+from armybot.domain.entities import (
+    Deployment,
+    PhoneInvite,
+    Project,
+    User,
+    UserCredential,
+    UsernameInvite,
+)
 from armybot.domain.enums import CredentialProvider, UserStatus
 
 

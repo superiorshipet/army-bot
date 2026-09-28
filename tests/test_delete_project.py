@@ -1,12 +1,14 @@
-import pytest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
 
+import pytest
+
+from armybot.application.use_cases.deploy import DeployProjectService
 from armybot.domain.entities import Project, User
 from armybot.domain.enums import ProjectStack, UserRole, UserStatus
 from armybot.infrastructure.database.sqlite_store import SqliteProjectRepository, SqliteStore
+from armybot.infrastructure.deploy.coordinator import DeploymentCoordinator
 from armybot.infrastructure.deploy.remote_executor import RemoteRecipeDeployExecutor
-from armybot.application.use_cases.deploy import DeployProjectService
 
 
 @pytest.mark.asyncio
@@ -60,7 +62,7 @@ async def test_deploy_service_delete_project_permissions(tmp_path):
         phone_number=None,
         role=UserRole.User,
         status=UserStatus.Active,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     other_user = User(
         id=uuid4(),
@@ -70,7 +72,7 @@ async def test_deploy_service_delete_project_permissions(tmp_path):
         phone_number=None,
         role=UserRole.User,
         status=UserStatus.Active,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
 
     project = Project(
@@ -103,6 +105,7 @@ async def test_deploy_service_delete_project_permissions(tmp_path):
         projects=repo,
         deployments=MockDeployments(),
         credentials=MockCredentials(),
+        coordinator=DeploymentCoordinator(),
     )
 
     # Unauthorized delete attempt

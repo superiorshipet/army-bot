@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -13,7 +13,7 @@ from armybot.domain.enums import (
 
 
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 @dataclass(slots=True)
@@ -98,3 +98,9 @@ class DeploymentPlan:
     notes: list[str] = field(default_factory=list)
     app_path: str = "."
     app_entry: str = "index.html"
+    target_name: str = ""
+    commit_sha: str | None = None
+
+    @property
+    def deployment_name(self) -> str:
+        return self.target_name or self.project_name

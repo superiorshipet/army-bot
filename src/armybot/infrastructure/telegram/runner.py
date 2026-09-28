@@ -23,6 +23,7 @@ async def run_bot() -> None:
             BotCommand(command="setup", description="Setup credentials"),
             BotCommand(command="deploy", description="Deploy a project"),
             BotCommand(command="status", description="Latest deployments"),
+            BotCommand(command="cancel", description="Cancel current deployment"),
             BotCommand(command="users", description="Admin: show all users"),
         ]
     )

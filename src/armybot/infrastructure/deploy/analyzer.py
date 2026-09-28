@@ -2,6 +2,7 @@ import asyncio
 import shutil
 from pathlib import Path
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from armybot.domain.entities import DeploymentPlan
 from armybot.domain.enums import ProjectStack
@@ -14,8 +15,12 @@ class FilesystemRepoAnalyzer:
 
     async def analyze(self, repo_url: str, branch: str) -> DeploymentPlan:
         repo_path, actual_branch = await self._prepare_repo(repo_url, branch)
-        project_name = self._project_name(repo_url, repo_path)
-        stack, build_steps, runtime, app_path, app_entry = self._detect_stack(repo_path)
+        project_name = self._project_name(repo_url, None)
+        try:
+            stack, build_steps, runtime, app_path, app_entry = self._detect_stack(repo_path)
+            commit_sha = await self._commit_sha(repo_path)
+        finally:
+            shutil.rmtree(repo_path, ignore_errors=True)
 
         return DeploymentPlan(
             project_name=project_name,
@@ -32,20 +37,17 @@ class FilesystemRepoAnalyzer:
             ],
             app_path=app_path,
             app_entry=app_entry,
+            commit_sha=commit_sha,
         )
 
     async def _prepare_repo(self, repo_url: str, branch: str) -> tuple[Path, str]:
         self.workspace_root.mkdir(parents=True, exist_ok=True)
-        if repo_url.startswith("/") or repo_url.startswith("."):
-            path = Path(repo_url).expanduser().resolve()
-            if not path.exists():
-                raise FileNotFoundError(f"Repository path not found: {path}")
-            return path, branch
+        parsed = urlparse(repo_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("Send a valid HTTP(S) Git repository URL.")
 
         name = self._project_name(repo_url, None)
-        target = self.workspace_root / name
-        if target.exists():
-            shutil.rmtree(target)
+        target = self.workspace_root / f"{name}-{uuid4().hex[:12]}"
 
         command = ["git", "clone", "--depth", "1", "--branch", branch, repo_url, str(target)]
         process = await asyncio.create_subprocess_exec(
@@ -58,7 +60,11 @@ class FilesystemRepoAnalyzer:
             return target, branch
 
         err_text = stderr.decode(errors="replace").strip()
-        if "Could not find remote branch" in err_text or "Remote branch" in err_text or "not found in upstream" in err_text:
+        if (
+            "Could not find remote branch" in err_text
+            or "Remote branch" in err_text
+            or "not found in upstream" in err_text
+        ):
             if target.exists():
                 shutil.rmtree(target)
             fallback_cmd = ["git", "clone", "--depth", "1", repo_url, str(target)]
@@ -67,10 +73,13 @@ class FilesystemRepoAnalyzer:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            _, fallback_err = await fallback_proc.communicate()
+            _, _fallback_err = await fallback_proc.communicate()
             if fallback_proc.returncode == 0:
                 rev_proc = await asyncio.create_subprocess_exec(
-                    "git", "rev-parse", "--abbrev-ref", "HEAD",
+                    "git",
+                    "rev-parse",
+                    "--abbrev-ref",
+                    "HEAD",
                     cwd=str(target),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
@@ -79,6 +88,7 @@ class FilesystemRepoAnalyzer:
                 detected_branch = rev_out.decode().strip() or "master"
                 return target, detected_branch
 
+        shutil.rmtree(target, ignore_errors=True)
         raise RuntimeError(err_text or "git clone failed")
 
     @staticmethod
@@ -91,19 +101,61 @@ class FilesystemRepoAnalyzer:
 
     @staticmethod
     def _detect_stack(repo_path: Path) -> tuple[ProjectStack, list[str], str, str, str]:
+        detected: list[tuple[int, ProjectStack, list[str], str, str, str]] = []
         for app_path in FilesystemRepoAnalyzer._candidate_app_paths(repo_path):
-            stack, build_steps, runtime, app_entry = FilesystemRepoAnalyzer._detect_stack_at(app_path)
-            if stack != ProjectStack.Unknown:
-                relative_path = app_path.relative_to(repo_path).as_posix()
-                return (
+            stack, build_steps, runtime, app_entry = FilesystemRepoAnalyzer._detect_stack_at(
+                app_path
+            )
+            if stack == ProjectStack.Unknown:
+                continue
+            relative_path = app_path.relative_to(repo_path).as_posix()
+            detected.append(
+                (
+                    FilesystemRepoAnalyzer._candidate_priority(repo_path, app_path, stack),
                     stack,
                     build_steps,
                     runtime,
                     "." if relative_path == "." else relative_path,
                     app_entry,
                 )
+            )
 
-        return ProjectStack.Unknown, ["manual inspection required"], "unknown", ".", "index.html"
+        if not detected:
+            return (
+                ProjectStack.Unknown,
+                ["manual inspection required"],
+                "unknown",
+                ".",
+                "index.html",
+            )
+
+        _, stack, build_steps, runtime, app_path, app_entry = max(
+            detected, key=lambda item: item[0]
+        )
+        return stack, build_steps, runtime, app_path, app_entry
+
+    @staticmethod
+    def _candidate_priority(repo_path: Path, app_path: Path, stack: ProjectStack) -> int:
+        relative = app_path.relative_to(repo_path)
+        if relative == Path("."):
+            package_json = repo_path / "package.json"
+            if package_json.exists() and '"workspaces"' in package_json.read_text(errors="ignore"):
+                return 20
+            return 100
+
+        first_part = relative.parts[0].lower()
+        score = 40 - len(relative.parts)
+        if first_part in {"client", "frontend", "front", "web", "ui", "apps"}:
+            score += 50
+        if first_part in {"server", "backend", "api"} and stack in {
+            ProjectStack.DotNet,
+            ProjectStack.SpringBoot,
+            ProjectStack.Laravel,
+            ProjectStack.Node,
+            ProjectStack.Python,
+        }:
+            score += 40
+        return score
 
     @staticmethod
     def _candidate_app_paths(repo_path: Path) -> list[Path]:
@@ -133,7 +185,10 @@ class FilesystemRepoAnalyzer:
         ):
             candidates.append(java_marker.parent)
         for html_file in repo_path.rglob("*.html"):
-            if any(part in {".git", "node_modules", "vendor", "dist", "build"} for part in html_file.parts):
+            if any(
+                part in {".git", "node_modules", "vendor", "dist", "build"}
+                for part in html_file.parts
+            ):
                 continue
             candidates.append(html_file.parent)
 
@@ -149,17 +204,42 @@ class FilesystemRepoAnalyzer:
     def _detect_stack_at(repo_path: Path) -> tuple[ProjectStack, list[str], str, str]:
         files = {path.name for path in repo_path.iterdir() if path.is_file()}
         if "composer.json" in files and "artisan" in files:
-            return ProjectStack.Laravel, ["composer install --no-dev", "php artisan migrate --force"], "php-fpm", "index.php"
+            return (
+                ProjectStack.Laravel,
+                ["composer install --no-dev", "php artisan migrate --force"],
+                "php-fpm",
+                "index.php",
+            )
         if FilesystemRepoAnalyzer._is_spring_boot(repo_path):
-            return ProjectStack.SpringBoot, ["mvn package -DskipTests or gradle bootJar"], "systemd", ""
+            return (
+                ProjectStack.SpringBoot,
+                ["mvn package -DskipTests or gradle bootJar"],
+                "systemd",
+                "",
+            )
         if any(path.suffix == ".csproj" for path in repo_path.rglob("*.csproj")):
-            return ProjectStack.DotNet, ["dotnet restore", "dotnet publish -c Release"], "systemd", ""
+            return (
+                ProjectStack.DotNet,
+                ["dotnet restore", "dotnet publish -c Release"],
+                "systemd",
+                "",
+            )
         if "package.json" in files:
             package = (repo_path / "package.json").read_text(errors="ignore")
             if "vite" in package:
-                return ProjectStack.Vite, ["npm install", "npm run build"], "nginx-static", "index.html"
+                return (
+                    ProjectStack.Vite,
+                    ["npm install", "npm run build"],
+                    "nginx-static",
+                    "index.html",
+                )
             if "react-scripts" in package:
-                return ProjectStack.React, ["npm install", "npm run build"], "nginx-static", "index.html"
+                return (
+                    ProjectStack.React,
+                    ["npm install", "npm run build"],
+                    "nginx-static",
+                    "index.html",
+                )
             return ProjectStack.Node, ["npm install", "npm run build"], "node", ""
         if "requirements.txt" in files or "pyproject.toml" in files:
             return ProjectStack.Python, ["pip install -r requirements.txt"], "systemd", ""
@@ -176,9 +256,7 @@ class FilesystemRepoAnalyzer:
             repo_path / "build.gradle.kts",
         ]
         content = "\n".join(
-            marker.read_text(errors="ignore").lower()
-            for marker in markers
-            if marker.exists()
+            marker.read_text(errors="ignore").lower() for marker in markers if marker.exists()
         )
         if not content:
             return False
@@ -191,7 +269,11 @@ class FilesystemRepoAnalyzer:
     @staticmethod
     def _detect_html_entry(repo_path: Path) -> str | None:
         html_files = sorted(
-            (path for path in repo_path.iterdir() if path.is_file() and path.suffix.lower() in {".html", ".htm"}),
+            (
+                path
+                for path in repo_path.iterdir()
+                if path.is_file() and path.suffix.lower() in {".html", ".htm"}
+            ),
             key=lambda path: path.name.lower(),
         )
         if not html_files:

@@ -18,11 +18,11 @@ logger = structlog.get_logger()
 # Only block commands that could destroy the entire server.
 # Everything else (rm, chmod, chown, systemctl, etc.) is allowed.
 _BLOCKED_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"\bdd\b.*\bof=/dev/[a-z]"),        # dd of=/dev/sda (disk wipe)
-    re.compile(r"\bmkfs\b.*\b/dev/[a-z]"),          # mkfs /dev/sda (format disk)
-    re.compile(r":\(\)\{.*\|.*&\s*\}\s*;"),          # fork bomb
-    re.compile(r">\s*/dev/sd[a-z]"),                 # write to raw disk device
-    re.compile(r"\binit\s+0\b"),                     # init 0
+    re.compile(r"\bdd\b.*\bof=/dev/[a-z]"),  # dd of=/dev/sda (disk wipe)
+    re.compile(r"\bmkfs\b.*\b/dev/[a-z]"),  # mkfs /dev/sda (format disk)
+    re.compile(r":\(\)\{.*\|.*&\s*\}\s*;"),  # fork bomb
+    re.compile(r">\s*/dev/sd[a-z]"),  # write to raw disk device
+    re.compile(r"\binit\s+0\b"),  # init 0
 ]
 
 
@@ -66,7 +66,7 @@ class SSHClient:
                 self._conn.run(command, check=False),
                 timeout=self.command_timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return "", f"Command timed out after {self.command_timeout}s", 1
 
         stdout = (result.stdout or "")[-4000:]
@@ -86,6 +86,4 @@ class SSHClient:
         lowered = command.strip().lower()
         for pattern in _BLOCKED_PATTERNS:
             if pattern.search(lowered):
-                raise CommandBlockedError(
-                    f"Blocked catastrophic command: {command!r}"
-                )
+                raise CommandBlockedError(f"Blocked catastrophic command: {command!r}")
