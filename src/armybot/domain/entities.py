@@ -6,6 +6,7 @@ from uuid import UUID
 from armybot.domain.enums import (
     CredentialProvider,
     DeploymentStatus,
+    DeploymentTarget,
     ProjectStack,
     UserRole,
     UserStatus,
@@ -69,6 +70,11 @@ class Project:
     branch: str
     stack: ProjectStack = ProjectStack.Unknown
     live_url: str | None = None
+    deployment_target: DeploymentTarget = DeploymentTarget.Server
+    auto_deploy_enabled: bool = False
+    last_deployed_sha: str | None = None
+    last_triggered_sha: str | None = None
+    target_config: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=utcnow)
 
 
@@ -100,6 +106,8 @@ class DeploymentPlan:
     app_entry: str = "index.html"
     target_name: str = ""
     commit_sha: str | None = None
+    deployment_target: DeploymentTarget = DeploymentTarget.Server
+    target_config: dict[str, Any] = field(default_factory=dict)
 
     @property
     def deployment_name(self) -> str:

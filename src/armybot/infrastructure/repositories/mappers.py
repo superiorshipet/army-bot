@@ -6,6 +6,7 @@ from armybot.domain.entities import (
     UserCredential,
     UsernameInvite,
 )
+from armybot.domain.enums import DeploymentTarget
 from armybot.infrastructure.database.models import (
     DeploymentModel,
     PhoneInviteModel,
@@ -65,6 +66,11 @@ def to_project(model: ProjectModel) -> Project:
         branch=model.branch,
         stack=model.stack,
         live_url=model.live_url,
+        deployment_target=DeploymentTarget(model.deployment_target),
+        auto_deploy_enabled=model.auto_deploy_enabled,
+        last_deployed_sha=model.last_deployed_sha,
+        last_triggered_sha=model.last_triggered_sha,
+        target_config=model.target_config or {},
         created_at=model.created_at,
     )
 

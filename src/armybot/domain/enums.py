@@ -18,6 +18,14 @@ class CredentialProvider(StrEnum):
     AWS = "aws"
     Cloudflare = "cloudflare"
     Server = "server"
+    Railway = "railway"
+    Firebase = "firebase"
+
+
+class DeploymentTarget(StrEnum):
+    Server = "server"
+    Railway = "railway"
+    Firebase = "firebase"
 
 
 class DeploymentStatus(StrEnum):

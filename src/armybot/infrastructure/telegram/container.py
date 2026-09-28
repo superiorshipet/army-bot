@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from armybot.application.use_cases.access import AccessService
 from armybot.application.use_cases.credentials import CredentialService
 from armybot.application.use_cases.deploy import DeployProjectService
+from armybot.domain.enums import DeploymentTarget
 from armybot.infrastructure.database.session import session_scope
 from armybot.infrastructure.database.sqlite_store import (
     SqliteCredentialRepository,
@@ -17,6 +18,10 @@ from armybot.infrastructure.database.sqlite_store import (
 from armybot.infrastructure.deploy.analyzer import FilesystemRepoAnalyzer
 from armybot.infrastructure.deploy.coordinator import deployment_coordinator
 from armybot.infrastructure.deploy.executor import SafeDeploymentExecutor
+from armybot.infrastructure.deploy.platform_executors import (
+    FirebaseDeployExecutor,
+    RailwayDeployExecutor,
+)
 from armybot.infrastructure.repositories.sqlalchemy_repositories import (
     SqlCredentialRepository,
     SqlDeploymentRepository,
@@ -25,6 +30,13 @@ from armybot.infrastructure.repositories.sqlalchemy_repositories import (
 )
 from armybot.infrastructure.security.fernet_box import FernetSecretBox
 from armybot.shared.settings import settings
+
+
+def _platform_executors():
+    return {
+        DeploymentTarget.Railway: RailwayDeployExecutor(),
+        DeploymentTarget.Firebase: FirebaseDeployExecutor(),
+    }
 
 
 def _build_executor():
@@ -73,6 +85,7 @@ class RequestContainer:
             deployments=self.deployments,
             credentials=self.credentials,
             coordinator=deployment_coordinator,
+            platform_executors=_platform_executors(),
         )
 
 
@@ -96,6 +109,7 @@ async def container_scope() -> AsyncIterator[RequestContainer]:
             deployments=container.deployments,
             credentials=container.credentials,
             coordinator=deployment_coordinator,
+            platform_executors=_platform_executors(),
         )
         yield container
         return

@@ -34,6 +34,10 @@ class SqlUserRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
+    async def get_by_id(self, user_id: UUID) -> User | None:
+        model = await self.session.get(UserModel, user_id)
+        return to_user(model) if model else None
+
     async def get_by_telegram_id(self, telegram_id: int) -> User | None:
         model = await self.session.scalar(
             select(UserModel).where(UserModel.telegram_id == telegram_id)
@@ -217,6 +221,11 @@ class SqlProjectRepository:
                 branch=project.branch,
                 stack=project.stack,
                 live_url=project.live_url,
+                deployment_target=project.deployment_target.value,
+                auto_deploy_enabled=project.auto_deploy_enabled,
+                last_deployed_sha=project.last_deployed_sha,
+                last_triggered_sha=project.last_triggered_sha,
+                target_config=project.target_config,
             )
         )
         await self.session.flush()
@@ -228,6 +237,11 @@ class SqlProjectRepository:
         model.name = project.name
         model.stack = project.stack
         model.live_url = project.live_url
+        model.deployment_target = project.deployment_target.value
+        model.auto_deploy_enabled = project.auto_deploy_enabled
+        model.last_deployed_sha = project.last_deployed_sha
+        model.last_triggered_sha = project.last_triggered_sha
+        model.target_config = project.target_config
         await self.session.flush()
 
     async def delete(self, project_id: UUID) -> None:
@@ -239,6 +253,12 @@ class SqlProjectRepository:
     async def list_for_user(self, user_id: UUID) -> list[Project]:
         rows = await self.session.scalars(
             select(ProjectModel).where(ProjectModel.user_id == user_id)
+        )
+        return [to_project(row) for row in rows]
+
+    async def list_auto_deploy(self) -> list[Project]:
+        rows = await self.session.scalars(
+            select(ProjectModel).where(ProjectModel.auto_deploy_enabled.is_(True))
         )
         return [to_project(row) for row in rows]
 

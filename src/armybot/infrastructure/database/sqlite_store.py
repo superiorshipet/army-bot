@@ -15,6 +15,7 @@ from armybot.domain.entities import (
 from armybot.domain.enums import (
     CredentialProvider,
     DeploymentStatus,
+    DeploymentTarget,
     ProjectStack,
     UserRole,
     UserStatus,
@@ -90,6 +91,11 @@ class SqliteStore:
                     branch TEXT NOT NULL,
                     stack TEXT NOT NULL,
                     live_url TEXT,
+                    deployment_target TEXT NOT NULL DEFAULT 'server',
+                    auto_deploy_enabled INTEGER NOT NULL DEFAULT 0,
+                    last_deployed_sha TEXT,
+                    last_triggered_sha TEXT,
+                    target_config TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL,
                     UNIQUE(user_id, repo_url, branch)
                 );
@@ -117,6 +123,30 @@ class SqliteStore:
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
             if "phone_number" not in columns:
                 conn.execute("ALTER TABLE users ADD COLUMN phone_number TEXT")
+            project_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(projects)").fetchall()
+            }
+            project_column_migrations = {
+                "deployment_target": (
+                    "ALTER TABLE projects ADD COLUMN deployment_target "
+                    "TEXT NOT NULL DEFAULT 'server'"
+                ),
+                "auto_deploy_enabled": (
+                    "ALTER TABLE projects ADD COLUMN auto_deploy_enabled INTEGER NOT NULL DEFAULT 0"
+                ),
+                "last_deployed_sha": "ALTER TABLE projects ADD COLUMN last_deployed_sha TEXT",
+                "last_triggered_sha": "ALTER TABLE projects ADD COLUMN last_triggered_sha TEXT",
+                "target_config": (
+                    "ALTER TABLE projects ADD COLUMN target_config TEXT NOT NULL DEFAULT '{}'"
+                ),
+            }
+            for column, statement in project_column_migrations.items():
+                if column not in project_columns:
+                    conn.execute(statement)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_projects_auto_deploy "
+                "ON projects (auto_deploy_enabled)"
+            )
             conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
                 (1, datetime.now().astimezone().isoformat()),
@@ -131,6 +161,11 @@ class SqliteUserRepository:
         with self.store._connect() as conn:
             row = conn.execute("SELECT 1 FROM users LIMIT 1").fetchone()
         return row is not None
+
+    async def get_by_id(self, user_id: UUID) -> User | None:
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT * FROM users WHERE id = ?", (str(user_id),)).fetchone()
+        return _row_to_user(row) if row else None
 
     async def get_by_telegram_id(self, telegram_id: int) -> User | None:
         with self.store._connect() as conn:
@@ -316,8 +351,10 @@ class SqliteProjectRepository:
             conn.execute(
                 """
                 INSERT INTO projects
-                    (id, user_id, name, repo_url, branch, stack, live_url, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, user_id, name, repo_url, branch, stack, live_url,
+                     deployment_target, auto_deploy_enabled, last_deployed_sha,
+                     last_triggered_sha, target_config, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(project.id),
@@ -327,6 +364,11 @@ class SqliteProjectRepository:
                     project.branch,
                     project.stack.value,
                     project.live_url,
+                    project.deployment_target.value,
+                    int(project.auto_deploy_enabled),
+                    project.last_deployed_sha,
+                    project.last_triggered_sha,
+                    json.dumps(project.target_config),
                     project.created_at.isoformat(),
                 ),
             )
@@ -334,8 +376,24 @@ class SqliteProjectRepository:
     async def update(self, project: Project) -> None:
         with self.store._connect() as conn:
             conn.execute(
-                "UPDATE projects SET name=?, stack=?, live_url=? WHERE id=?",
-                (project.name, project.stack.value, project.live_url, str(project.id)),
+                """
+                UPDATE projects
+                SET name=?, stack=?, live_url=?, deployment_target=?,
+                    auto_deploy_enabled=?, last_deployed_sha=?, last_triggered_sha=?,
+                    target_config=?
+                WHERE id=?
+                """,
+                (
+                    project.name,
+                    project.stack.value,
+                    project.live_url,
+                    project.deployment_target.value,
+                    int(project.auto_deploy_enabled),
+                    project.last_deployed_sha,
+                    project.last_triggered_sha,
+                    json.dumps(project.target_config),
+                    str(project.id),
+                ),
             )
 
     async def delete(self, project_id: UUID) -> None:
@@ -348,6 +406,11 @@ class SqliteProjectRepository:
             rows = conn.execute(
                 "SELECT * FROM projects WHERE user_id=?", (str(user_id),)
             ).fetchall()
+        return [_row_to_project(row) for row in rows]
+
+    async def list_auto_deploy(self) -> list[Project]:
+        with self.store._connect() as conn:
+            rows = conn.execute("SELECT * FROM projects WHERE auto_deploy_enabled = 1").fetchall()
         return [_row_to_project(row) for row in rows]
 
 
@@ -450,6 +513,11 @@ def _row_to_project(row: sqlite3.Row) -> Project:
         branch=row["branch"],
         stack=ProjectStack(row["stack"]),
         live_url=row["live_url"],
+        deployment_target=DeploymentTarget(row["deployment_target"]),
+        auto_deploy_enabled=bool(row["auto_deploy_enabled"]),
+        last_deployed_sha=row["last_deployed_sha"],
+        last_triggered_sha=row["last_triggered_sha"],
+        target_config=json.loads(row["target_config"] or "{}"),
         created_at=datetime.fromisoformat(row["created_at"]),
     )
 

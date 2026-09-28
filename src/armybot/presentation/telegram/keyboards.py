@@ -14,6 +14,8 @@ REQUIRED_CREDENTIALS = (
     CredentialProvider.GitHub,
     CredentialProvider.Server,
     CredentialProvider.Cloudflare,
+    CredentialProvider.Railway,
+    CredentialProvider.Firebase,
 )
 
 
@@ -31,9 +33,10 @@ def access_decision_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
 def main_menu_keyboard(
     is_admin: bool = False, has_server_cred: bool = False
 ) -> InlineKeyboardMarkup:
-    top_row = [InlineKeyboardButton(text="Setup credentials", callback_data="menu:setup")]
-    if has_server_cred:
-        top_row.append(InlineKeyboardButton(text="Deploy project", callback_data="menu:deploy"))
+    top_row = [
+        InlineKeyboardButton(text="Setup credentials", callback_data="menu:setup"),
+        InlineKeyboardButton(text="Deploy project", callback_data="menu:deploy"),
+    ]
     rows = [
         top_row,
         [
@@ -127,12 +130,27 @@ def deploy_prompt_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def deployment_target_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="My Server", callback_data="deploy:target:server"),
+                InlineKeyboardButton(text="Railway", callback_data="deploy:target:railway"),
+            ],
+            [InlineKeyboardButton(text="Firebase Hosting", callback_data="deploy:target:firebase")],
+            [InlineKeyboardButton(text="Back to menu", callback_data="menu:home")],
+        ]
+    )
+
+
 def provider_label(provider: CredentialProvider) -> str:
     labels = {
         CredentialProvider.GitHub: "GitHub",
         CredentialProvider.AWS: "AWS",
         CredentialProvider.Cloudflare: "Cloudflare",
         CredentialProvider.Server: "Server",
+        CredentialProvider.Railway: "Railway",
+        CredentialProvider.Firebase: "Firebase",
     }
     return labels[provider]
 
@@ -156,6 +174,17 @@ def projects_list_keyboard(projects: list[Project]) -> InlineKeyboardMarkup:
 
 def project_details_keyboard(project: Project) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
+    auto_action = "off" if project.auto_deploy_enabled else "on"
+    auto_label = "Disable Auto Deploy" if project.auto_deploy_enabled else "Enable Auto Deploy"
+    rows.append(
+        [
+            InlineKeyboardButton(text="Deploy now", callback_data=f"project:deploy:{project.id}"),
+            InlineKeyboardButton(
+                text=auto_label,
+                callback_data=f"project:auto:{project.id}:{auto_action}",
+            ),
+        ]
+    )
     actions: list[InlineKeyboardButton] = []
     if project.live_url:
         actions.append(InlineKeyboardButton(text="🌐 Open Site", url=project.live_url))

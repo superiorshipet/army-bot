@@ -2,13 +2,14 @@ import asyncio
 from collections.abc import Callable, Coroutine
 from dataclasses import replace
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from armybot.application.ports.deploy import DeploymentExecutor, RepoAnalyzer
 from armybot.application.ports.repositories import DeploymentRepository, ProjectRepository
 from armybot.application.use_cases.credentials import CredentialService
 from armybot.domain.entities import Deployment, Project, User, utcnow
-from armybot.domain.enums import DeploymentStatus
+from armybot.domain.enums import DeploymentStatus, DeploymentTarget
 from armybot.infrastructure.deploy.coordinator import DeploymentCoordinator
 from armybot.shared.redaction import redact_lines, redact_text
 
@@ -24,6 +25,7 @@ class DeployProjectService:
         deployments: DeploymentRepository,
         credentials: CredentialService,
         coordinator: DeploymentCoordinator,
+        platform_executors: dict[DeploymentTarget, DeploymentExecutor] | None = None,
     ) -> None:
         self.analyzer = analyzer
         self.executor = executor
@@ -31,6 +33,7 @@ class DeployProjectService:
         self.deployments = deployments
         self.credentials = credentials
         self.coordinator = coordinator
+        self.platform_executors = platform_executors or {}
 
     async def deploy(
         self,
@@ -38,6 +41,8 @@ class DeployProjectService:
         repo_url: str,
         branch: str = "main",
         on_log: LogCallback = None,
+        target: DeploymentTarget = DeploymentTarget.Server,
+        triggered_by: str = "manual",
     ) -> Deployment:
         plan = await self.analyzer.analyze(repo_url, branch)
         project = await self.projects.get_by_repo(user.id, repo_url, branch)
@@ -49,10 +54,21 @@ class DeployProjectService:
                 repo_url=repo_url,
                 branch=branch,
                 stack=plan.stack,
+                deployment_target=target,
             )
             await self.projects.add(project)
+        elif project.deployment_target != target:
+            project.deployment_target = target
+            project.live_url = None
+            project.target_config = {}
+            await self.projects.update(project)
 
-        plan = replace(plan, target_name=f"{plan.project_name}-{project.id.hex[:8]}")
+        plan = replace(
+            plan,
+            target_name=f"{plan.project_name}-{project.id.hex[:8]}",
+            deployment_target=target,
+            target_config=dict(project.target_config),
+        )
 
         deployment = Deployment(
             id=uuid4(),
@@ -67,37 +83,50 @@ class DeployProjectService:
                 "runtime": plan.runtime,
                 "app_path": plan.app_path,
                 "target_name": plan.deployment_name,
+                "deployment_target": target.value,
+                "triggered_by": triggered_by,
                 "recipe_version": 2,
             },
         )
         await self.deployments.add(deployment)
 
         secrets = await self.credentials.load_all(user)
-        server = secrets.get("server", {})
+        target_credentials = secrets.get(target.value, {})
         target_key = ":".join(
             (
-                str(server.get("host", "")),
-                str(server.get("base_path", "")),
+                target.value,
+                str(target_credentials.get("host", target_credentials.get("project_id", ""))),
+                str(target_credentials.get("base_path", "")),
                 plan.deployment_name,
             )
         )
+        executor = self.platform_executors.get(target, self.executor)
 
-        async def execute() -> tuple[str | None, list[str]]:
+        async def execute():
             deployment.status = DeploymentStatus.Planning
             deployment.updated_at = utcnow()
             await self.deployments.update(deployment)
             deployment.status = DeploymentStatus.Running
             deployment.updated_at = utcnow()
             await self.deployments.update(deployment)
-            return await self.executor.deploy(plan, secrets, on_log)
+            return await executor.deploy(plan, secrets, on_log)
 
         try:
-            live_url, logs = await self.coordinator.run(target_key, user.id, execute())
+            output = await self.coordinator.run(target_key, user.id, execute())
+            if len(output) == 3:
+                live_url, logs, target_config = output
+            else:
+                live_url, logs = output
+                target_config = project.target_config
             deployment.live_url = live_url
             deployment.logs.extend(redact_lines(logs, secrets))
             deployment.status = DeploymentStatus.Successful
             project.live_url = live_url
             project.stack = plan.stack
+            project.deployment_target = target
+            project.last_deployed_sha = plan.commit_sha
+            project.last_triggered_sha = plan.commit_sha
+            project.target_config = dict(target_config)
             await self.projects.update(project)
         except asyncio.CancelledError:
             deployment.status = DeploymentStatus.Cancelled
@@ -109,6 +138,32 @@ class DeployProjectService:
         deployment.updated_at = utcnow()
         await self.deployments.update(deployment)
         return deployment
+
+    async def set_auto_deploy(
+        self,
+        user: User,
+        project_id: str,
+        enabled: bool,
+    ) -> Project:
+        from uuid import UUID
+
+        project = await self.projects.get_by_id(UUID(project_id))
+        if not project:
+            raise LookupError("Project not found.")
+        if project.user_id != user.id and not user.is_super_admin:
+            raise PermissionError("You do not have permission to update this project.")
+        if enabled:
+            hostname = (urlparse(project.repo_url).hostname or "").lower()
+            if hostname not in {"github.com", "www.github.com"}:
+                raise ValueError("Auto deploy currently supports GitHub repositories only.")
+            secrets = await self.credentials.load_all(user)
+            if not str(secrets.get("github", {}).get("token", "")).strip():
+                raise ValueError("Add your GitHub token before enabling auto deploy.")
+        project.auto_deploy_enabled = enabled
+        if enabled and not project.last_triggered_sha:
+            project.last_triggered_sha = project.last_deployed_sha
+        await self.projects.update(project)
+        return project
 
     async def cancel_current(self, user: User) -> bool:
         return await self.coordinator.cancel_for_user(user.id)
@@ -139,7 +194,10 @@ class DeployProjectService:
 
         try:
             secrets = await self.credentials.load_all(user)
-            if hasattr(self.executor, "cleanup_project"):
+            if project.deployment_target != DeploymentTarget.Server:
+                if on_log:
+                    await on_log("Removing the project from Army Deploy...")
+            elif hasattr(self.executor, "cleanup_project"):
                 await self.executor.cleanup_project(
                     f"{project.name}-{project.id.hex[:8]}", secrets, on_log
                 )

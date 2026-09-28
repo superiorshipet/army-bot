@@ -9,6 +9,7 @@ from armybot.infrastructure.database.sqlite_store import SqliteStore, SqliteUser
 from armybot.presentation.telegram.keyboards import (
     admin_panel_keyboard,
     cancel_deployment_keyboard,
+    deployment_target_keyboard,
     main_menu_keyboard,
     rejected_users_keyboard,
 )
@@ -19,7 +20,7 @@ def test_main_menu_keyboard_visibility():
     kb1 = main_menu_keyboard(is_admin=False, has_server_cred=False)
     texts1 = [btn.text for row in kb1.inline_keyboard for btn in row]
     assert "Admin panel" not in texts1
-    assert "Deploy project" not in texts1
+    assert "Deploy project" in texts1
     assert "Setup credentials" in texts1
     assert "Projects" in texts1
     assert "Status" in texts1
@@ -98,3 +99,12 @@ def test_cancel_deployment_keyboard_callback() -> None:
     keyboard = cancel_deployment_keyboard()
 
     assert keyboard.inline_keyboard[0][0].callback_data == "deployment:cancel"
+
+
+def test_deployment_target_keyboard_has_all_destinations() -> None:
+    keyboard = deployment_target_keyboard()
+    callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
+
+    assert "deploy:target:server" in callbacks
+    assert "deploy:target:railway" in callbacks
+    assert "deploy:target:firebase" in callbacks
