@@ -457,6 +457,14 @@ class SqliteDeploymentRepository:
             ).fetchall()
         return [_row_to_deployment(row) for row in rows]
 
+    async def latest_for_project(self, project_id: UUID, limit: int = 10) -> list[Deployment]:
+        with self.store._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM deployments WHERE project_id=? ORDER BY created_at DESC LIMIT ?",
+                (str(project_id), limit),
+            ).fetchall()
+        return [_row_to_deployment(row) for row in rows]
+
 
 def _row_to_user(row: sqlite3.Row) -> User:
     from datetime import datetime

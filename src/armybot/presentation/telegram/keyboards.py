@@ -77,6 +77,85 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def pending_users_keyboard(users: list[User]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for user in users:
+        label = _user_button_label(user)
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"admin:user:{user.id}")])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Approve", callback_data=f"access:approve:{user.telegram_id}"
+                ),
+                InlineKeyboardButton(
+                    text="Reject", callback_data=f"access:reject:{user.telegram_id}"
+                ),
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="Back to Admin panel", callback_data="menu:admin")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_users_keyboard(users: list[User]) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"{_user_button_label(user)} - {user.status.value}",
+                callback_data=f"admin:user:{user.id}",
+            )
+        ]
+        for user in users
+    ]
+    rows.append([InlineKeyboardButton(text="Back to Admin panel", callback_data="menu:admin")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_user_projects_keyboard(projects: list[Project]) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"{project.name} - {project.deployment_target.value}",
+                callback_data=f"admin:project:{project.id}",
+            )
+        ]
+        for project in projects
+    ]
+    rows.extend(
+        [
+            [InlineKeyboardButton(text="Back to All users", callback_data="admin:users")],
+            [InlineKeyboardButton(text="Admin panel", callback_data="menu:admin")],
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_project_keyboard(project: Project) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text="Deploy now", callback_data=f"admin:project:deploy:{project.id}"
+            ),
+            InlineKeyboardButton(
+                text="View logs", callback_data=f"admin:project:logs:{project.id}"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="Delete project", callback_data=f"project:del_prompt:{project.id}"
+            )
+        ],
+        [InlineKeyboardButton(text="Back to user", callback_data=f"admin:user:{project.user_id}")],
+    ]
+    if project.live_url:
+        rows.insert(1, [InlineKeyboardButton(text="Open site", url=project.live_url)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _user_button_label(user: User) -> str:
+    label = user.full_name or user.username or str(user.telegram_id)
+    return label if len(label) <= 28 else label[:26] + ".."
+
+
 def rejected_users_keyboard(users: list[User]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for user in users:

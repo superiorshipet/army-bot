@@ -6,7 +6,11 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 from armybot.application.ports.deploy import DeploymentExecutor, RepoAnalyzer
-from armybot.application.ports.repositories import DeploymentRepository, ProjectRepository
+from armybot.application.ports.repositories import (
+    DeploymentRepository,
+    ProjectRepository,
+    UserRepository,
+)
 from armybot.application.use_cases.credentials import CredentialService
 from armybot.domain.entities import Deployment, Project, User, utcnow
 from armybot.domain.enums import DeploymentStatus, DeploymentTarget
@@ -26,6 +30,7 @@ class DeployProjectService:
         credentials: CredentialService,
         coordinator: DeploymentCoordinator,
         platform_executors: dict[DeploymentTarget, DeploymentExecutor] | None = None,
+        users: UserRepository | None = None,
     ) -> None:
         self.analyzer = analyzer
         self.executor = executor
@@ -34,6 +39,7 @@ class DeployProjectService:
         self.credentials = credentials
         self.coordinator = coordinator
         self.platform_executors = platform_executors or {}
+        self.users = users
 
     async def deploy(
         self,
@@ -165,6 +171,35 @@ class DeployProjectService:
         await self.projects.update(project)
         return project
 
+    async def deploy_existing(
+        self,
+        actor: User,
+        project_id: str,
+        on_log: LogCallback = None,
+    ) -> Deployment:
+        from uuid import UUID
+
+        project = await self.projects.get_by_id(UUID(project_id))
+        if not project:
+            raise LookupError("Project not found.")
+        if project.user_id != actor.id and not actor.is_super_admin:
+            raise PermissionError("You do not have permission to deploy this project.")
+        owner = actor
+        if project.user_id != actor.id:
+            if not self.users:
+                raise RuntimeError("Project owner lookup is not configured.")
+            owner = await self.users.get_by_id(project.user_id)
+            if not owner:
+                raise LookupError("Project owner not found.")
+        return await self.deploy(
+            owner,
+            project.repo_url,
+            project.branch,
+            on_log=on_log,
+            target=project.deployment_target,
+            triggered_by="admin" if actor.id != owner.id else "manual",
+        )
+
     async def cancel_current(self, user: User) -> bool:
         return await self.coordinator.cancel_for_user(user.id)
 
@@ -193,7 +228,10 @@ class DeployProjectService:
             return False, "You do not have permission to delete this project."
 
         try:
-            secrets = await self.credentials.load_all(user)
+            credential_owner = user
+            if project.user_id != user.id and self.users:
+                credential_owner = await self.users.get_by_id(project.user_id) or user
+            secrets = await self.credentials.load_all(credential_owner)
             if project.deployment_target != DeploymentTarget.Server:
                 if on_log:
                     await on_log("Removing the project from Army Deploy...")

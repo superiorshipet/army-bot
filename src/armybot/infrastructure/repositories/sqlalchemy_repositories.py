@@ -302,3 +302,12 @@ class SqlDeploymentRepository:
             .limit(limit)
         )
         return [to_deployment(row) for row in rows]
+
+    async def latest_for_project(self, project_id: UUID, limit: int = 10) -> list[Deployment]:
+        rows = await self.session.scalars(
+            select(DeploymentModel)
+            .where(DeploymentModel.project_id == project_id)
+            .order_by(DeploymentModel.created_at.desc())
+            .limit(limit)
+        )
+        return [to_deployment(row) for row in rows]

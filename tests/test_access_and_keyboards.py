@@ -3,14 +3,18 @@ from uuid import uuid4
 import pytest
 
 from armybot.application.use_cases.access import AccessService
-from armybot.domain.entities import User
-from armybot.domain.enums import UserRole, UserStatus
+from armybot.domain.entities import Project, User
+from armybot.domain.enums import DeploymentTarget, ProjectStack, UserRole, UserStatus
 from armybot.infrastructure.database.sqlite_store import SqliteStore, SqliteUserRepository
 from armybot.presentation.telegram.keyboards import (
     admin_panel_keyboard,
+    admin_project_keyboard,
+    admin_user_projects_keyboard,
+    admin_users_keyboard,
     cancel_deployment_keyboard,
     deployment_target_keyboard,
     main_menu_keyboard,
+    pending_users_keyboard,
     rejected_users_keyboard,
 )
 
@@ -108,3 +112,53 @@ def test_deployment_target_keyboard_has_all_destinations() -> None:
     assert "deploy:target:server" in callbacks
     assert "deploy:target:railway" in callbacks
     assert "deploy:target:firebase" in callbacks
+
+
+def test_admin_keyboards_expose_user_decisions_and_project_actions() -> None:
+    user = User(
+        id=uuid4(),
+        telegram_id=123456,
+        full_name="Pending User",
+        username="pending_user",
+        phone_number=None,
+        role=UserRole.User,
+        status=UserStatus.Pending,
+    )
+    project = Project(
+        id=uuid4(),
+        user_id=user.id,
+        name="mobile-app",
+        repo_url="https://github.com/example/mobile-app",
+        branch="main",
+        stack=ProjectStack.Vite,
+        deployment_target=DeploymentTarget.Railway,
+    )
+
+    pending_callbacks = [
+        button.callback_data
+        for row in pending_users_keyboard([user]).inline_keyboard
+        for button in row
+    ]
+    user_callbacks = [
+        button.callback_data
+        for row in admin_users_keyboard([user]).inline_keyboard
+        for button in row
+    ]
+    project_list_callbacks = [
+        button.callback_data
+        for row in admin_user_projects_keyboard([project]).inline_keyboard
+        for button in row
+    ]
+    project_callbacks = [
+        button.callback_data
+        for row in admin_project_keyboard(project).inline_keyboard
+        for button in row
+    ]
+
+    assert f"access:approve:{user.telegram_id}" in pending_callbacks
+    assert f"access:reject:{user.telegram_id}" in pending_callbacks
+    assert f"admin:user:{user.id}" in user_callbacks
+    assert f"admin:project:{project.id}" in project_list_callbacks
+    assert f"admin:project:deploy:{project.id}" in project_callbacks
+    assert f"admin:project:logs:{project.id}" in project_callbacks
+    assert f"project:del_prompt:{project.id}" in project_callbacks

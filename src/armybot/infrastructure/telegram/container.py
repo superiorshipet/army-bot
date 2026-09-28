@@ -86,6 +86,7 @@ class RequestContainer:
             credentials=self.credentials,
             coordinator=deployment_coordinator,
             platform_executors=_platform_executors(),
+            users=self.users,
         )
 
 
@@ -110,6 +111,7 @@ async def container_scope() -> AsyncIterator[RequestContainer]:
             credentials=container.credentials,
             coordinator=deployment_coordinator,
             platform_executors=_platform_executors(),
+            users=container.users,
         )
         yield container
         return
