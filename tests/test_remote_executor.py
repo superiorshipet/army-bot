@@ -115,6 +115,8 @@ def test_common_git_prep_contains_db_and_env():
     assert "/etc/army_deploy_bot.env" not in prep
     assert "CREATE DATABASE" in prep
     assert "systemctl is-active mongod" in prep
+    assert "tail -n +2" in prep
+    assert "tail -n +4" not in prep
 
 
 def test_node_site_script_contains_asset_normalization_and_prisma():
