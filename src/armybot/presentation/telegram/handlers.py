@@ -1506,7 +1506,8 @@ def _credential_prompt(provider: CredentialProvider, action: str) -> str:
         return (
             f"{verb} GitHub credentials\n\n"
             "Paste the GitHub token only.\n"
-            "Required access: repo read access for private repositories."
+            "For GitHub Pages use Contents read/write, Pages write, and "
+            "Administration write permissions."
         )
     if provider == CredentialProvider.Cloudflare:
         return (
@@ -1597,6 +1598,7 @@ def _target_provider(target: DeploymentTarget) -> CredentialProvider:
         DeploymentTarget.Server: CredentialProvider.Server,
         DeploymentTarget.Railway: CredentialProvider.Railway,
         DeploymentTarget.Firebase: CredentialProvider.Firebase,
+        DeploymentTarget.GitHubPages: CredentialProvider.GitHub,
     }[target]
 
 

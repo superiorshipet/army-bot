@@ -20,6 +20,7 @@ from armybot.infrastructure.deploy.coordinator import deployment_coordinator
 from armybot.infrastructure.deploy.executor import SafeDeploymentExecutor
 from armybot.infrastructure.deploy.platform_executors import (
     FirebaseDeployExecutor,
+    GitHubPagesDeployExecutor,
     RailwayDeployExecutor,
 )
 from armybot.infrastructure.repositories.sqlalchemy_repositories import (
@@ -36,6 +37,7 @@ def _platform_executors():
     return {
         DeploymentTarget.Railway: RailwayDeployExecutor(),
         DeploymentTarget.Firebase: FirebaseDeployExecutor(),
+        DeploymentTarget.GitHubPages: GitHubPagesDeployExecutor(),
     }
 
 

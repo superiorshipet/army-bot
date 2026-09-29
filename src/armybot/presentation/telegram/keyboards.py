@@ -216,7 +216,14 @@ def deployment_target_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="My Server", callback_data="deploy:target:server"),
                 InlineKeyboardButton(text="Railway", callback_data="deploy:target:railway"),
             ],
-            [InlineKeyboardButton(text="Firebase Hosting", callback_data="deploy:target:firebase")],
+            [
+                InlineKeyboardButton(
+                    text="Firebase Hosting", callback_data="deploy:target:firebase"
+                ),
+                InlineKeyboardButton(
+                    text="GitHub Pages", callback_data="deploy:target:github_pages"
+                ),
+            ],
             [InlineKeyboardButton(text="Back to menu", callback_data="menu:home")],
         ]
     )

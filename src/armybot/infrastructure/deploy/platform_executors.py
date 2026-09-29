@@ -8,7 +8,10 @@ import shutil
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, ClassVar
+from urllib.parse import quote, urlparse
 from uuid import uuid4
+
+import httpx
 
 from armybot.application.ports.deploy import DeploymentOutput, LogCallback
 from armybot.domain.entities import DeploymentPlan
@@ -48,16 +51,23 @@ class _PlatformExecutor:
         command: list[str],
         cwd: Path,
         env: dict[str, str] | None = None,
+        inherit_env: bool = True,
     ) -> str:
         executable = command[0]
         if shutil.which(executable) is None:
             raise PlatformCommandError(
                 f"{executable} CLI is not installed on the Army Deploy server."
             )
+        if inherit_env:
+            process_env = dict(os.environ)
+        else:
+            allowed_keys = ("HOME", "LANG", "LC_ALL", "LOGNAME", "PATH", "SHELL", "TMPDIR", "USER")
+            process_env = {key: os.environ[key] for key in allowed_keys if key in os.environ}
+        process_env.update(env or {})
         process = await asyncio.create_subprocess_exec(
             *command,
             cwd=str(cwd),
-            env={**os.environ, **(env or {})},
+            env=process_env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -81,6 +91,49 @@ class _PlatformExecutor:
     async def _log(callback: LogCallback, text: str) -> None:
         if callback:
             await callback(text)
+
+
+class _StaticHostingExecutor(_PlatformExecutor):
+    supported_stacks: ClassVar[set[ProjectStack]] = {
+        ProjectStack.Vite,
+        ProjectStack.React,
+        ProjectStack.Static,
+    }
+
+    async def _prepare_public_dir(
+        self,
+        plan: DeploymentPlan,
+        app_path: Path,
+        env: dict[str, str],
+        on_log: LogCallback,
+        base_path: str | None = None,
+    ) -> Path:
+        if plan.stack == ProjectStack.Static:
+            entry = app_path / plan.app_entry
+            if not entry.exists():
+                raise PlatformCommandError(f"Static entry file '{plan.app_entry}' was not found.")
+            if entry.name != "index.html":
+                shutil.copy2(entry, app_path / "index.html")
+            return app_path
+
+        await self._log(on_log, "Installing frontend dependencies...")
+        install_command = (
+            ["npm", "ci"] if (app_path / "package-lock.json").exists() else ["npm", "install"]
+        )
+        await self._run(install_command, app_path, env, inherit_env=False)
+        await self._log(on_log, "Building the frontend...")
+        build_command = ["npm", "run", "build"]
+        build_env = dict(env)
+        if base_path and plan.stack == ProjectStack.Vite:
+            build_command.extend(["--", "--base", base_path])
+        elif base_path and plan.stack == ProjectStack.React:
+            build_env["PUBLIC_URL"] = base_path.rstrip("/") or "/"
+        await self._run(build_command, app_path, build_env, inherit_env=False)
+        for name in ("dist", "build"):
+            output = app_path / name
+            if output.is_dir():
+                return output
+        raise PlatformCommandError("The frontend build finished without a dist or build folder.")
 
 
 class RailwayDeployExecutor(_PlatformExecutor):
@@ -178,13 +231,7 @@ class RailwayDeployExecutor(_PlatformExecutor):
             )
 
 
-class FirebaseDeployExecutor(_PlatformExecutor):
-    supported_stacks: ClassVar[set[ProjectStack]] = {
-        ProjectStack.Vite,
-        ProjectStack.React,
-        ProjectStack.Static,
-    }
-
+class FirebaseDeployExecutor(_StaticHostingExecutor):
     async def deploy(
         self,
         plan: DeploymentPlan,
@@ -256,39 +303,6 @@ class FirebaseDeployExecutor(_PlatformExecutor):
                 Path(service_account_file).unlink(missing_ok=True)
             shutil.rmtree(repo_path, ignore_errors=True)
 
-    async def _prepare_public_dir(
-        self,
-        plan: DeploymentPlan,
-        app_path: Path,
-        env: dict[str, str],
-        on_log: LogCallback,
-    ) -> Path:
-        if plan.stack == ProjectStack.Static:
-            entry = app_path / plan.app_entry
-            if not entry.exists():
-                raise PlatformCommandError(f"Static entry file '{plan.app_entry}' was not found.")
-            if entry.name != "index.html":
-                shutil.copy2(entry, app_path / "index.html")
-            return app_path
-
-        await self._log(on_log, "Installing frontend dependencies...")
-        install_command = (
-            ["npm", "ci"]
-            if (app_path / "package-lock.json").exists()
-            else [
-                "npm",
-                "install",
-            ]
-        )
-        await self._run(install_command, app_path, env)
-        await self._log(on_log, "Building the frontend...")
-        await self._run(["npm", "run", "build"], app_path, env)
-        for name in ("dist", "build"):
-            output = app_path / name
-            if output.is_dir():
-                return output
-        raise PlatformCommandError("The frontend build finished without a dist or build folder.")
-
     async def _ensure_firebase_site(
         self,
         site_id: str,
@@ -321,6 +335,162 @@ class FirebaseDeployExecutor(_PlatformExecutor):
             app_path,
             env,
         )
+
+
+class GitHubPagesDeployExecutor(_StaticHostingExecutor):
+    def __init__(
+        self,
+        command_timeout: int | None = None,
+        http_transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        super().__init__(command_timeout)
+        self.http_transport = http_transport
+
+    async def deploy(
+        self,
+        plan: DeploymentPlan,
+        credentials: dict[str, dict],
+        on_log: LogCallback = None,
+    ) -> DeploymentOutput:
+        if plan.stack not in self.supported_stacks:
+            raise ValueError("GitHub Pages supports Vite, React, and plain static sites only.")
+        github = credentials.get("github", {})
+        token = str(github.get("token", "")).strip()
+        if not token:
+            raise ValueError("Add your GitHub token before deploying to GitHub Pages.")
+
+        owner, repository = _github_repository_parts(plan.repo_url)
+        repo_path = await self._clone(plan)
+        publish_path = self.workspace_root / f"pages-{uuid4().hex[:12]}"
+        askpass_file: str | None = None
+        logs: list[str] = []
+        try:
+            app_path = (repo_path / plan.app_path).resolve()
+            base_path = _github_pages_base_path(owner, repository)
+            public_dir = await self._prepare_public_dir(
+                plan,
+                app_path,
+                {},
+                on_log,
+                base_path=base_path,
+            )
+
+            shutil.copytree(
+                public_dir,
+                publish_path,
+                symlinks=True,
+                ignore=shutil.ignore_patterns(".git", ".github", "node_modules"),
+            )
+            nojekyll_file = publish_path / ".nojekyll"
+            if nojekyll_file.is_symlink():
+                nojekyll_file.unlink()
+            nojekyll_file.touch()
+            index_file = publish_path / "index.html"
+            not_found_file = publish_path / "404.html"
+            if index_file.is_file() and not index_file.is_symlink() and not not_found_file.exists():
+                shutil.copy2(index_file, not_found_file)
+
+            await self._log(on_log, "Publishing the build to the gh-pages branch...")
+            await self._run(
+                ["git", "init", "--initial-branch=gh-pages"],
+                publish_path,
+                inherit_env=False,
+            )
+            await self._run(
+                ["git", "config", "user.name", "Army Deploy Bot"],
+                publish_path,
+                inherit_env=False,
+            )
+            await self._run(
+                ["git", "config", "user.email", "army-deploy@users.noreply.github.com"],
+                publish_path,
+                inherit_env=False,
+            )
+            await self._run(["git", "add", "--all"], publish_path, inherit_env=False)
+            await self._run(
+                ["git", "commit", "-m", f"Deploy {plan.commit_sha or 'latest'}"],
+                publish_path,
+                inherit_env=False,
+            )
+
+            with NamedTemporaryFile(
+                mode="w", prefix="army-github-askpass-", delete=False
+            ) as handle:
+                handle.write(
+                    "#!/bin/sh\n"
+                    'case "$1" in\n'
+                    "  *Username*) printf '%s\\n' 'x-access-token' ;;\n"
+                    "  *) printf '%s\\n' \"$ARMY_GITHUB_TOKEN\" ;;\n"
+                    "esac\n"
+                )
+                askpass_file = handle.name
+            os.chmod(askpass_file, 0o700)
+            push_env = {
+                "ARMY_GITHUB_TOKEN": token,
+                "GIT_ASKPASS": askpass_file,
+                "GIT_TERMINAL_PROMPT": "0",
+            }
+            remote_url = f"https://github.com/{owner}/{repository}.git"
+            await self._run(
+                ["git", "push", "--force", remote_url, "HEAD:gh-pages"],
+                publish_path,
+                push_env,
+                inherit_env=False,
+            )
+            logs.append("GitHub Pages branch published.")
+
+            await self._log(on_log, "Enabling GitHub Pages...")
+            live_url = await self._configure_pages(owner, repository, token)
+            logs.append("GitHub Pages deployment configured.")
+            return (
+                live_url,
+                logs,
+                {"owner": owner, "repository": repository, "pages_branch": "gh-pages"},
+            )
+        finally:
+            if askpass_file:
+                Path(askpass_file).unlink(missing_ok=True)
+            shutil.rmtree(repo_path, ignore_errors=True)
+            shutil.rmtree(publish_path, ignore_errors=True)
+
+    async def _configure_pages(self, owner: str, repository: str, token: str) -> str:
+        api_url = f"https://api.github.com/repos/{quote(owner)}/{quote(repository)}/pages"
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        payload = {"source": {"branch": "gh-pages", "path": "/"}}
+        async with httpx.AsyncClient(
+            timeout=self.command_timeout,
+            transport=self.http_transport,
+        ) as client:
+            current = await client.get(api_url, headers=headers)
+            if current.status_code == 200:
+                method = client.put
+                expected_status = 204
+            elif current.status_code == 404:
+                method = client.post
+                expected_status = 201
+            else:
+                raise PlatformCommandError(_github_pages_api_error(current))
+
+            response: httpx.Response | None = None
+            for attempt in range(3):
+                response = await method(api_url, headers=headers, json=payload)
+                if response.status_code == expected_status:
+                    break
+                if response.status_code not in {409, 422} or attempt == 2:
+                    raise PlatformCommandError(_github_pages_api_error(response))
+                await asyncio.sleep(2 * (attempt + 1))
+
+            refreshed = await client.get(api_url, headers=headers)
+            if refreshed.status_code == 200:
+                html_url = refreshed.json().get("html_url")
+                if isinstance(html_url, str) and html_url:
+                    return html_url.rstrip("/") + "/"
+
+        return _github_pages_url(owner, repository)
 
 
 def _find_json_value(raw: str, *keys: str) -> str | None:
@@ -361,3 +531,35 @@ def _firebase_site_id(value: str) -> str:
     cleaned = re.sub(r"[^a-z0-9-]", "-", value.lower()).strip("-")
     cleaned = re.sub(r"-+", "-", cleaned)
     return (cleaned or f"army-{uuid4().hex[:12]}")[:30].rstrip("-")
+
+
+def _github_repository_parts(repo_url: str) -> tuple[str, str]:
+    parsed = urlparse(repo_url)
+    if parsed.hostname not in {"github.com", "www.github.com"}:
+        raise ValueError("GitHub Pages requires a github.com repository URL.")
+    parts = [part for part in parsed.path.strip("/").split("/") if part]
+    if len(parts) != 2:
+        raise ValueError("Send a GitHub repository URL, not a file or folder URL.")
+    return parts[0], parts[1].removesuffix(".git")
+
+
+def _github_pages_base_path(owner: str, repository: str) -> str:
+    if repository.lower() == f"{owner.lower()}.github.io":
+        return "/"
+    return f"/{repository}/"
+
+
+def _github_pages_url(owner: str, repository: str) -> str:
+    return f"https://{owner}.github.io{_github_pages_base_path(owner, repository)}"
+
+
+def _github_pages_api_error(response: httpx.Response) -> str:
+    try:
+        message = response.json().get("message", response.text)
+    except (ValueError, AttributeError):
+        message = response.text
+    detail = str(message).strip()[:400] or "Unknown GitHub API error"
+    return (
+        f"GitHub Pages API returned {response.status_code}: {detail}. "
+        "Check that the token can write Contents and Pages and administer this repository."
+    )

@@ -112,6 +112,7 @@ def test_deployment_target_keyboard_has_all_destinations() -> None:
     assert "deploy:target:server" in callbacks
     assert "deploy:target:railway" in callbacks
     assert "deploy:target:firebase" in callbacks
+    assert "deploy:target:github_pages" in callbacks
 
 
 def test_admin_keyboards_expose_user_decisions_and_project_actions() -> None:

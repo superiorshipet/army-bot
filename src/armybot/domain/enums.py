@@ -26,6 +26,7 @@ class DeploymentTarget(StrEnum):
     Server = "server"
     Railway = "railway"
     Firebase = "firebase"
+    GitHubPages = "github_pages"
 
 
 class DeploymentStatus(StrEnum):

@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
+import httpx
 import pytest
 
 from armybot.application.use_cases.deploy import DeployProjectService
@@ -19,6 +21,11 @@ from armybot.infrastructure.database.sqlite_store import (
 )
 from armybot.infrastructure.deploy.coordinator import DeploymentCoordinator
 from armybot.infrastructure.deploy.github_monitor import GitHubBranchClient
+from armybot.infrastructure.deploy.platform_executors import (
+    GitHubPagesDeployExecutor,
+    _github_pages_base_path,
+    _github_pages_url,
+)
 
 
 @pytest.mark.asyncio
@@ -224,3 +231,105 @@ async def test_admin_redeploys_existing_project_as_owner(tmp_path) -> None:
     assert restored.last_deployed_sha == "owner-sha"
     assert history[0].id == deployment.id
     assert history[0].metadata["triggered_by"] == "admin"
+
+
+def test_github_pages_uses_repository_base_path() -> None:
+    assert _github_pages_base_path("Example", "portfolio") == "/portfolio/"
+    assert _github_pages_url("Example", "portfolio") == ("https://Example.github.io/portfolio/")
+    assert _github_pages_base_path("Example", "example.github.io") == "/"
+    assert _github_pages_url("Example", "example.github.io") == ("https://Example.github.io/")
+
+
+@pytest.mark.asyncio
+async def test_github_pages_executor_publishes_without_token_in_command(
+    tmp_path, monkeypatch
+) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / "index.html").write_text("<h1>Pages</h1>")
+    executor = GitHubPagesDeployExecutor()
+    executor.workspace_root = tmp_path
+    calls: list[tuple[list[str], dict[str, str], bool]] = []
+
+    async def clone(_plan):
+        return repo_path
+
+    async def run(command, _cwd, env=None, inherit_env=True):
+        calls.append((command, env or {}, inherit_env))
+        return "ok"
+
+    async def configure_pages(owner, repository, token):
+        assert (owner, repository, token) == ("example", "demo", "github-secret")
+        return "https://example.github.io/demo/"
+
+    monkeypatch.setattr(executor, "_clone", clone)
+    monkeypatch.setattr(executor, "_run", run)
+    monkeypatch.setattr(executor, "_configure_pages", configure_pages)
+    plan = DeploymentPlan(
+        project_name="demo",
+        repo_url="https://github.com/example/demo",
+        branch="main",
+        stack=ProjectStack.Static,
+        build_steps=[],
+        runtime="nginx-static",
+        app_entry="index.html",
+        commit_sha="abc123",
+    )
+
+    live_url, logs, config = await executor.deploy(plan, {"github": {"token": "github-secret"}})
+
+    push_call = next(call for call in calls if call[0][:2] == ["git", "push"])
+    assert "github-secret" not in " ".join(push_call[0])
+    assert push_call[1]["ARMY_GITHUB_TOKEN"] == "github-secret"
+    assert not Path(push_call[1]["GIT_ASKPASS"]).exists()
+    assert push_call[2] is False
+    assert live_url == "https://example.github.io/demo/"
+    assert logs == [
+        "GitHub Pages branch published.",
+        "GitHub Pages deployment configured.",
+    ]
+    assert config == {
+        "owner": "example",
+        "repository": "demo",
+        "pages_branch": "gh-pages",
+    }
+
+
+@pytest.mark.asyncio
+async def test_github_pages_executor_enables_branch_with_github_api() -> None:
+    requests: list[httpx.Request] = []
+    responses = iter(
+        [
+            httpx.Response(404),
+            httpx.Response(201),
+            httpx.Response(200, json={"html_url": "https://example.github.io/demo"}),
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return next(responses)
+
+    executor = GitHubPagesDeployExecutor(http_transport=httpx.MockTransport(handler))
+
+    live_url = await executor._configure_pages("example", "demo", "github-secret")
+
+    assert [request.method for request in requests] == ["GET", "POST", "GET"]
+    assert requests[1].headers["authorization"] == "Bearer github-secret"
+    assert live_url == "https://example.github.io/demo/"
+
+
+@pytest.mark.asyncio
+async def test_github_pages_executor_rejects_backend_stacks() -> None:
+    executor = GitHubPagesDeployExecutor()
+    plan = DeploymentPlan(
+        project_name="api",
+        repo_url="https://github.com/example/api",
+        branch="main",
+        stack=ProjectStack.DotNet,
+        build_steps=[],
+        runtime="systemd",
+    )
+
+    with pytest.raises(ValueError, match="Vite, React, and plain static"):
+        await executor.deploy(plan, {"github": {"token": "github-secret"}})
