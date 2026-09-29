@@ -1,0 +1,363 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import re
+import shutil
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+from typing import Any, ClassVar
+from uuid import uuid4
+
+from armybot.application.ports.deploy import DeploymentOutput, LogCallback
+from armybot.domain.entities import DeploymentPlan
+from armybot.domain.enums import ProjectStack
+from armybot.shared.settings import settings
+
+
+class PlatformCommandError(RuntimeError):
+    pass
+
+
+class _PlatformExecutor:
+    def __init__(self, command_timeout: int | None = None) -> None:
+        self.command_timeout = command_timeout or settings.platform_command_timeout
+        self.workspace_root = settings.workspace_root
+
+    async def _clone(self, plan: DeploymentPlan) -> Path:
+        self.workspace_root.mkdir(parents=True, exist_ok=True)
+        target = self.workspace_root / f"platform-{uuid4().hex[:12]}"
+        await self._run(
+            [
+                "git",
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                plan.branch,
+                plan.repo_url,
+                str(target),
+            ],
+            cwd=self.workspace_root,
+        )
+        return target
+
+    async def _run(
+        self,
+        command: list[str],
+        cwd: Path,
+        env: dict[str, str] | None = None,
+    ) -> str:
+        executable = command[0]
+        if shutil.which(executable) is None:
+            raise PlatformCommandError(
+                f"{executable} CLI is not installed on the Army Deploy server."
+            )
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            cwd=str(cwd),
+            env={**os.environ, **(env or {})},
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=self.command_timeout
+            )
+        except TimeoutError as exc:
+            process.kill()
+            await process.communicate()
+            raise PlatformCommandError(
+                f"{executable} timed out after {self.command_timeout} seconds."
+            ) from exc
+        output = stdout.decode(errors="replace").strip()
+        error = stderr.decode(errors="replace").strip()
+        if process.returncode != 0:
+            raise PlatformCommandError(error or output or f"{executable} failed.")
+        return output or error
+
+    @staticmethod
+    async def _log(callback: LogCallback, text: str) -> None:
+        if callback:
+            await callback(text)
+
+
+class RailwayDeployExecutor(_PlatformExecutor):
+    async def deploy(
+        self,
+        plan: DeploymentPlan,
+        credentials: dict[str, dict],
+        on_log: LogCallback = None,
+    ) -> DeploymentOutput:
+        railway = credentials.get("railway", {})
+        token = str(railway.get("token", "")).strip()
+        if not token:
+            raise ValueError("Add your Railway account token before deploying to Railway.")
+
+        repo_path = await self._clone(plan)
+        app_path = (repo_path / plan.app_path).resolve()
+        env = {"RAILWAY_API_TOKEN": token, "RAILWAY_TOKEN": token}
+        config = dict(plan.target_config)
+        logs: list[str] = []
+        try:
+            project_id = str(config.get("project_id", "")).strip()
+            if not project_id:
+                await self._log(on_log, "Creating the Railway project...")
+                command = ["railway", "init", "--name", plan.deployment_name, "--json"]
+                workspace = str(railway.get("workspace", "")).strip()
+                if workspace:
+                    command.extend(["--workspace", workspace])
+                response = await self._run(command, app_path, env)
+                project_id = _find_json_value(response, "projectId", "project_id", "id")
+                if not project_id:
+                    raise PlatformCommandError(
+                        "Railway created the project but did not return its project ID."
+                    )
+                logs.append("Railway project created.")
+
+            await self._log(on_log, "Uploading the application to Railway...")
+            await self._run(
+                [
+                    "railway",
+                    "up",
+                    "--ci",
+                    "--project",
+                    project_id,
+                    "--environment",
+                    "production",
+                ],
+                app_path,
+                env,
+            )
+            logs.append("Railway deployment completed.")
+
+            await self._log(on_log, "Preparing the public Railway URL...")
+            domain_output = await self._railway_domain(project_id, app_path, env)
+            live_url = _find_url(domain_output, ("railway.app", "up.railway.app"))
+            if not live_url:
+                raise PlatformCommandError(
+                    "Deployment succeeded, but Railway did not return a public domain."
+                )
+            config.update({"project_id": project_id, "environment": "production"})
+            return live_url, logs, config
+        finally:
+            shutil.rmtree(repo_path, ignore_errors=True)
+
+    async def _railway_domain(
+        self,
+        project_id: str,
+        app_path: Path,
+        env: dict[str, str],
+    ) -> str:
+        command = [
+            "railway",
+            "domain",
+            "--project",
+            project_id,
+            "--environment",
+            "production",
+            "--json",
+        ]
+        try:
+            return await self._run(command, app_path, env)
+        except PlatformCommandError:
+            return await self._run(
+                [
+                    "railway",
+                    "domain",
+                    "list",
+                    "--project",
+                    project_id,
+                    "--environment",
+                    "production",
+                    "--json",
+                ],
+                app_path,
+                env,
+            )
+
+
+class FirebaseDeployExecutor(_PlatformExecutor):
+    supported_stacks: ClassVar[set[ProjectStack]] = {
+        ProjectStack.Vite,
+        ProjectStack.React,
+        ProjectStack.Static,
+    }
+
+    async def deploy(
+        self,
+        plan: DeploymentPlan,
+        credentials: dict[str, dict],
+        on_log: LogCallback = None,
+    ) -> DeploymentOutput:
+        if plan.stack not in self.supported_stacks:
+            raise ValueError(
+                "Firebase Hosting currently supports Vite, React, and plain static sites only."
+            )
+        firebase = credentials.get("firebase", {})
+        service_account = firebase.get("service_account")
+        project_id = str(firebase.get("project_id", "")).strip()
+        if not isinstance(service_account, dict) or not project_id:
+            raise ValueError("Add a Firebase service-account JSON before deploying.")
+
+        repo_path = await self._clone(plan)
+        app_path = (repo_path / plan.app_path).resolve()
+        logs: list[str] = []
+        service_account_file: str | None = None
+        try:
+            with NamedTemporaryFile(
+                mode="w", prefix="army-firebase-", suffix=".json", delete=False
+            ) as handle:
+                json.dump(service_account, handle)
+                service_account_file = handle.name
+            os.chmod(service_account_file, 0o600)
+            env = {"GOOGLE_APPLICATION_CREDENTIALS": service_account_file}
+
+            public_dir = await self._prepare_public_dir(plan, app_path, env, on_log)
+            site_id = str(plan.target_config.get("site_id", "")).strip()
+            if not site_id:
+                site_id = _firebase_site_id(plan.deployment_name)
+
+            await self._ensure_firebase_site(site_id, project_id, app_path, env)
+            firebase_config = {
+                "hosting": {
+                    "site": site_id,
+                    "public": os.path.relpath(public_dir, app_path),
+                    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+                    "rewrites": [{"source": "**", "destination": "/index.html"}],
+                }
+            }
+            (app_path / "firebase.json").write_text(
+                json.dumps(firebase_config, indent=2), encoding="utf-8"
+            )
+            await self._log(on_log, "Uploading the site to Firebase Hosting...")
+            await self._run(
+                [
+                    "firebase",
+                    "deploy",
+                    "--only",
+                    "hosting",
+                    "--project",
+                    project_id,
+                    "--non-interactive",
+                ],
+                app_path,
+                env,
+            )
+            logs.append("Firebase Hosting deployment completed.")
+            return (
+                f"https://{site_id}.web.app",
+                logs,
+                {"project_id": project_id, "site_id": site_id},
+            )
+        finally:
+            if service_account_file:
+                Path(service_account_file).unlink(missing_ok=True)
+            shutil.rmtree(repo_path, ignore_errors=True)
+
+    async def _prepare_public_dir(
+        self,
+        plan: DeploymentPlan,
+        app_path: Path,
+        env: dict[str, str],
+        on_log: LogCallback,
+    ) -> Path:
+        if plan.stack == ProjectStack.Static:
+            entry = app_path / plan.app_entry
+            if not entry.exists():
+                raise PlatformCommandError(f"Static entry file '{plan.app_entry}' was not found.")
+            if entry.name != "index.html":
+                shutil.copy2(entry, app_path / "index.html")
+            return app_path
+
+        await self._log(on_log, "Installing frontend dependencies...")
+        install_command = (
+            ["npm", "ci"]
+            if (app_path / "package-lock.json").exists()
+            else [
+                "npm",
+                "install",
+            ]
+        )
+        await self._run(install_command, app_path, env)
+        await self._log(on_log, "Building the frontend...")
+        await self._run(["npm", "run", "build"], app_path, env)
+        for name in ("dist", "build"):
+            output = app_path / name
+            if output.is_dir():
+                return output
+        raise PlatformCommandError("The frontend build finished without a dist or build folder.")
+
+    async def _ensure_firebase_site(
+        self,
+        site_id: str,
+        project_id: str,
+        app_path: Path,
+        env: dict[str, str],
+    ) -> None:
+        sites = await self._run(
+            [
+                "firebase",
+                "hosting:sites:list",
+                "--project",
+                project_id,
+                "--json",
+            ],
+            app_path,
+            env,
+        )
+        if site_id in sites:
+            return
+        await self._run(
+            [
+                "firebase",
+                "hosting:sites:create",
+                site_id,
+                "--project",
+                project_id,
+                "--non-interactive",
+            ],
+            app_path,
+            env,
+        )
+
+
+def _find_json_value(raw: str, *keys: str) -> str | None:
+    try:
+        payload: Any = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+    def search(value: Any) -> str | None:
+        if isinstance(value, dict):
+            for key in keys:
+                item = value.get(key)
+                if isinstance(item, str) and item:
+                    return item
+            for item in value.values():
+                found = search(item)
+                if found:
+                    return found
+        if isinstance(value, list):
+            for item in value:
+                found = search(item)
+                if found:
+                    return found
+        return None
+
+    return search(payload)
+
+
+def _find_url(raw: str, allowed_suffixes: tuple[str, ...]) -> str | None:
+    for match in re.findall(r"(?:https?://)?[a-zA-Z0-9.-]+", raw):
+        hostname = match.removeprefix("https://").removeprefix("http://").rstrip(".")
+        if any(hostname.endswith(suffix) for suffix in allowed_suffixes):
+            return f"https://{hostname}"
+    return None
+
+
+def _firebase_site_id(value: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9-]", "-", value.lower()).strip("-")
+    cleaned = re.sub(r"-+", "-", cleaned)
+    return (cleaned or f"army-{uuid4().hex[:12]}")[:30].rstrip("-")

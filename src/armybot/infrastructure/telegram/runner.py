@@ -3,6 +3,7 @@ from aiogram.types import BotCommand
 
 from armybot.infrastructure.database.session import create_schema
 from armybot.infrastructure.database.sqlite_store import SqliteStore
+from armybot.infrastructure.deploy.auto_deploy import AutoDeployWorker
 from armybot.presentation.telegram.handlers import router
 from armybot.shared.logging import configure_logging
 from armybot.shared.settings import settings
@@ -29,4 +30,12 @@ async def run_bot() -> None:
     )
     dispatcher = Dispatcher()
     dispatcher.include_router(router)
-    await dispatcher.start_polling(bot)
+    auto_deploy_task = asyncio.create_task(AutoDeployWorker(bot).run())
+    try:
+        await dispatcher.start_polling(bot)
+    finally:
+        auto_deploy_task.cancel()
+        await asyncio.gather(auto_deploy_task, return_exceptions=True)
+
+
+import asyncio

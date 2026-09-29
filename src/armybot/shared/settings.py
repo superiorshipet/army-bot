@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     groq_model: str = "openai/gpt-oss-120b"
     ai_max_commands: int = 50
     ai_command_timeout: int = 120
+    platform_command_timeout: int = 900
+    auto_deploy_enabled: bool = True
+    auto_deploy_interval_seconds: int = 60
 
     @cached_property
     def super_admin_ids(self) -> set[int]:

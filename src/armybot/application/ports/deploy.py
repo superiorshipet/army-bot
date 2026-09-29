@@ -3,6 +3,8 @@ from typing import Any, Protocol
 
 from armybot.domain.entities import DeploymentPlan
 
+DeploymentOutput = tuple[str | None, list[str]] | tuple[str | None, list[str], dict[str, Any]]
+
 LogCallback = Callable[[str], Coroutine[Any, Any, None]] | None
 
 
@@ -16,4 +18,4 @@ class DeploymentExecutor(Protocol):
         plan: DeploymentPlan,
         credentials: dict[str, dict],
         on_log: LogCallback = None,
-    ) -> tuple[str | None, list[str]]: ...
+    ) -> DeploymentOutput: ...

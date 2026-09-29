@@ -25,6 +25,17 @@ MIGRATIONS: tuple[Migration, ...] = (
             ),
         ),
     ),
+    (
+        2,
+        (
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS deployment_target VARCHAR(32) NOT NULL DEFAULT 'server'",
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS auto_deploy_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS last_deployed_sha VARCHAR(80)",
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS last_triggered_sha VARCHAR(80)",
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS target_config JSON NOT NULL DEFAULT '{}'::json",
+            "CREATE INDEX IF NOT EXISTS ix_projects_auto_deploy ON projects (auto_deploy_enabled)",
+        ),
+    ),
 )
 
 

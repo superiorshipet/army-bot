@@ -1,6 +1,11 @@
+import json
+from html import escape
+from io import BytesIO
+from uuid import UUID
+
 import structlog
 from aiogram import F, Router
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -12,7 +17,8 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 
-from armybot.domain.enums import CredentialProvider, UserStatus
+from armybot.domain.entities import Deployment, Project, User
+from armybot.domain.enums import CredentialProvider, DeploymentTarget, UserStatus
 from armybot.infrastructure.telegram.container import container_scope
 from armybot.presentation.telegram.formatters import (
     deployment_error_html,
@@ -22,9 +28,14 @@ from armybot.presentation.telegram.formatters import (
 from armybot.presentation.telegram.keyboards import (
     access_decision_keyboard,
     admin_panel_keyboard,
+    admin_project_keyboard,
+    admin_user_projects_keyboard,
+    admin_users_keyboard,
     cancel_deployment_keyboard,
     deploy_prompt_keyboard,
+    deployment_target_keyboard,
     main_menu_keyboard,
+    pending_users_keyboard,
     project_delete_confirm_keyboard,
     project_details_keyboard,
     projects_list_keyboard,
@@ -136,36 +147,11 @@ async def reply_deploy(message: Message, state: FSMContext) -> None:
     if not message.from_user:
         return
     async with container_scope() as c:
-        user = await c.access.require_active(message.from_user.id)
-        creds = await c.credentials_repo.list_for_user(user.id)
-        has_server_cred = any(cr.provider == CredentialProvider.Server for cr in creds)
-
-    if not has_server_cred:
-        await message.answer(
-            "⚠️ <b>Server credentials required!</b>\n\n"
-            "You must configure your <b>Server</b> credentials first before you can deploy any project.",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="⚙️ Setup Server credentials", callback_data="cred:add:server"
-                        )
-                    ],
-                    [InlineKeyboardButton(text="⬅️ Back to menu", callback_data="menu:home")],
-                ]
-            ),
-            parse_mode="HTML",
-        )
-        return
-
-    await state.set_state(SetupFlow.waiting_deploy_repo)
+        await c.access.require_active(message.from_user.id)
+    await state.clear()
     await message.answer(
-        "Send the HTTP(S) Git repository URL.\n"
-        "Optional branch format:\n"
-        "repo_url branch\n\n"
-        "Example:\n"
-        "https://github.com/user/project main",
-        reply_markup=deploy_prompt_keyboard(),
+        "Where do you want to deploy this project?",
+        reply_markup=deployment_target_keyboard(),
     )
 
 
@@ -291,30 +277,45 @@ async def menu_deploy(callback: CallbackQuery, state: FSMContext) -> None:
     if not callback.from_user:
         return
     async with container_scope() as c:
-        user = await c.access.require_active(callback.from_user.id)
-        creds = await c.credentials_repo.list_for_user(user.id)
-        has_server_cred = any(cr.provider == CredentialProvider.Server for cr in creds)
+        await c.access.require_active(callback.from_user.id)
+    await state.clear()
+    await callback.message.edit_text(
+        "Where do you want to deploy this project?",
+        reply_markup=deployment_target_keyboard(),
+    )
+    await callback.answer()
 
-    if not has_server_cred:
+
+@router.callback_query(F.data.startswith("deploy:target:"))
+async def choose_deployment_target(callback: CallbackQuery, state: FSMContext) -> None:
+    if not callback.from_user or not callback.data:
+        return
+    target = DeploymentTarget(callback.data.rsplit(":", 1)[1])
+    provider = _target_provider(target)
+    async with container_scope() as c:
+        user = await c.access.require_active(callback.from_user.id)
+        saved = {
+            credential.provider for credential in await c.credentials_repo.list_for_user(user.id)
+        }
+    if provider not in saved:
         await callback.message.edit_text(
-            "⚠️ <b>Server credentials required!</b>\n\n"
-            "You must configure your <b>Server</b> credentials first before you can deploy any project.",
+            f"Add your {provider_label(provider)} credentials first.",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
                     [
                         InlineKeyboardButton(
-                            text="⚙️ Setup Server credentials", callback_data="cred:add:server"
+                            text=f"Add {provider_label(provider)}",
+                            callback_data=f"cred:add:{provider.value}",
                         )
                     ],
-                    [InlineKeyboardButton(text="⬅️ Back to menu", callback_data="menu:home")],
+                    [InlineKeyboardButton(text="Back", callback_data="menu:deploy")],
                 ]
             ),
-            parse_mode="HTML",
         )
         await callback.answer()
         return
-
     await state.set_state(SetupFlow.waiting_deploy_repo)
+    await state.update_data(deployment_target=target.value)
     await callback.message.edit_text(
         "Send the HTTP(S) Git repository URL.\n"
         "Optional branch format:\n"
@@ -408,10 +409,9 @@ async def admin_pending(callback: CallbackQuery) -> None:
         if not users
         else "Pending users:\n" + "\n".join(user_line(user) for user in users)
     )
+    markup = pending_users_keyboard(users) if users else admin_panel_keyboard()
     try:
-        await callback.message.edit_text(
-            text, reply_markup=admin_panel_keyboard(), parse_mode="HTML"
-        )
+        await callback.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
     except TelegramBadRequest as err:
         if "message is not modified" not in str(err).lower():
             raise
@@ -422,14 +422,156 @@ async def admin_pending(callback: CallbackQuery) -> None:
 async def admin_users(callback: CallbackQuery) -> None:
     if not callback.from_user:
         return
-    text = await _all_users_text(callback.from_user.id)
+    async with container_scope() as c:
+        await c.access.require_super_admin(callback.from_user.id)
+        users = await c.access.all_users()
+    text = (
+        "No users yet."
+        if not users
+        else f"<b>All users ({len(users)}):</b>\n\nChoose a user to view their projects."
+    )
+    markup = admin_users_keyboard(users) if users else admin_panel_keyboard()
     try:
-        await callback.message.edit_text(
-            text, reply_markup=admin_panel_keyboard(), parse_mode="HTML"
-        )
+        await callback.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
     except TelegramBadRequest as err:
         if "message is not modified" not in str(err).lower():
             raise
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:user:"))
+async def admin_user_details(callback: CallbackQuery) -> None:
+    if not callback.from_user or not callback.data:
+        return
+    try:
+        user_id = UUID(callback.data.split(":", 2)[2])
+    except ValueError:
+        await callback.answer("Invalid user.", show_alert=True)
+        return
+    async with container_scope() as c:
+        await c.access.require_super_admin(callback.from_user.id)
+        target_user = await c.users.get_by_id(user_id)
+        projects = await c.projects.list_for_user(user_id) if target_user else []
+        project_rows = []
+        for project in projects:
+            deployments = await c.deployments.latest_for_project(project.id, 1)
+            project_rows.append((project, deployments[0] if deployments else None))
+    if not target_user:
+        await callback.answer("User not found.", show_alert=True)
+        return
+    project_lines = [
+        (
+            f"• <b>{escape(project.name)}</b> - "
+            f"<code>{escape(deployment.status.value if deployment else 'not_deployed')}</code>"
+        )
+        for project, deployment in project_rows
+    ]
+    text = (
+        f"<b>User details</b>\n\n"
+        f"{user_line(target_user)}\n"
+        f"Projects: <b>{len(projects)}</b>\n\n"
+        + ("\n".join(project_lines) if project_lines else "No projects yet.")
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=admin_user_projects_keyboard(projects),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.regexp(r"^admin:project:[0-9a-f-]{36}$"))
+async def admin_project_details(callback: CallbackQuery) -> None:
+    if not callback.from_user or not callback.data:
+        return
+    project_id = UUID(callback.data.rsplit(":", 1)[1])
+    async with container_scope() as c:
+        await c.access.require_super_admin(callback.from_user.id)
+        project = await c.projects.get_by_id(project_id)
+        owner = await c.users.get_by_id(project.user_id) if project else None
+        deployments = await c.deployments.latest_for_project(project_id, 1) if project else []
+    if not project:
+        await callback.answer("Project not found.", show_alert=True)
+        return
+    latest = deployments[0] if deployments else None
+    await callback.message.edit_text(
+        _admin_project_text(project, owner, latest),
+        reply_markup=admin_project_keyboard(project),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:project:logs:"))
+async def admin_project_logs(callback: CallbackQuery) -> None:
+    if not callback.from_user or not callback.data:
+        return
+    project_id = UUID(callback.data.rsplit(":", 1)[1])
+    async with container_scope() as c:
+        await c.access.require_super_admin(callback.from_user.id)
+        project = await c.projects.get_by_id(project_id)
+        deployments = await c.deployments.latest_for_project(project_id, 1) if project else []
+    if not project:
+        await callback.answer("Project not found.", show_alert=True)
+        return
+    if not deployments:
+        text = f"<b>{escape(project.name)}</b>\n\nNo deployment logs yet."
+    else:
+        deployment = deployments[0]
+        logs = "\n".join(escape(line[:180]) for line in deployment.logs[-20:])
+        text = (
+            f"<b>{escape(project.name)} - latest deployment</b>\n\n"
+            f"Status: <code>{escape(deployment.status.value)}</code>\n"
+            f"Branch: <code>{escape(deployment.branch)}</code>\n"
+            f"Commit: <code>{escape(deployment.commit_sha or 'unknown')}</code>\n\n"
+            f"<b>Logs</b>\n<pre>{logs or 'No logs.'}</pre>"
+        )
+    await callback.message.edit_text(
+        text,
+        reply_markup=admin_project_keyboard(project),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:project:deploy:"))
+async def admin_project_deploy(callback: CallbackQuery) -> None:
+    if not callback.from_user or not callback.data:
+        return
+    project_id = callback.data.rsplit(":", 1)[1]
+    await callback.message.edit_text(
+        "Deployment started...", reply_markup=cancel_deployment_keyboard()
+    )
+
+    async def _live_log(text: str) -> None:
+        try:
+            await callback.message.edit_text(
+                f"Deploying...\n\n{escape(text)}",
+                reply_markup=cancel_deployment_keyboard(),
+            )
+        except TelegramBadRequest:
+            logger.debug("telegram.noncritical_action_failed")
+
+    try:
+        async with container_scope() as c:
+            admin = await c.access.require_super_admin(callback.from_user.id)
+            deployment = await c.deploy.deploy_existing(admin, project_id, on_log=_live_log)
+        await callback.message.edit_text(
+            deployment_report_html(deployment),
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="Project details", callback_data=f"admin:project:{project_id}"
+                        )
+                    ]
+                ]
+            ),
+            parse_mode="HTML",
+        )
+    except Exception as exc:
+        logger.exception("telegram.admin_deployment_failed", project_id=project_id)
+        await callback.message.edit_text(deployment_error_html(exc), parse_mode="HTML")
     await callback.answer()
 
 
@@ -538,7 +680,16 @@ async def receive_credential(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     provider = CredentialProvider(data["provider"])
     try:
-        payload = _parse_credential_payload(provider, message.text or "")
+        credential_text = message.text or ""
+        if message.document:
+            if provider != CredentialProvider.Firebase:
+                raise ValueError("This credential must be sent as text.")
+            if message.document.file_size and message.document.file_size > 64 * 1024:
+                raise ValueError("Firebase credential JSON must be smaller than 64 KB.")
+            buffer = BytesIO()
+            await message.bot.download(message.document, destination=buffer)
+            credential_text = buffer.getvalue().decode("utf-8")
+        payload = _parse_credential_payload(provider, credential_text)
     except ValueError as exc:
         await message.answer(str(exc), reply_markup=deploy_prompt_keyboard())
         return
@@ -573,6 +724,8 @@ async def receive_deploy_repo(message: Message, state: FSMContext) -> None:
         )
         return
 
+    data = await state.get_data()
+    target = DeploymentTarget(data.get("deployment_target", DeploymentTarget.Server.value))
     repo_url = args[0].strip()
     branch = args[1].strip() if len(args) > 1 else "main"
     await state.clear()
@@ -592,17 +745,16 @@ async def receive_deploy_repo(message: Message, state: FSMContext) -> None:
         async with container_scope() as c:
             user = await c.access.require_active(message.from_user.id)
             creds = await c.credentials_repo.list_for_user(user.id)
-            has_server_cred = any(cr.provider == CredentialProvider.Server for cr in creds)
-            if not has_server_cred:
+            provider = _target_provider(target)
+            if not any(cr.provider == provider for cr in creds):
                 await notice.edit_text(
-                    "⚠️ <b>Server credentials required!</b>\n\n"
-                    "You must configure your <b>Server</b> credentials first before you can deploy any project.",
+                    f"Add your <b>{provider_label(provider)}</b> credentials first.",
                     reply_markup=InlineKeyboardMarkup(
                         inline_keyboard=[
                             [
                                 InlineKeyboardButton(
-                                    text="⚙️ Setup Server credentials",
-                                    callback_data="cred:add:server",
+                                    text=f"Add {provider_label(provider)}",
+                                    callback_data=f"cred:add:{provider.value}",
                                 )
                             ],
                             [
@@ -615,7 +767,13 @@ async def receive_deploy_repo(message: Message, state: FSMContext) -> None:
                     parse_mode="HTML",
                 )
                 return
-            deployment = await c.deploy.deploy(user, repo_url, branch, on_log=_live_log)
+            deployment = await c.deploy.deploy(
+                user,
+                repo_url,
+                branch,
+                on_log=_live_log,
+                target=target,
+            )
         await notice.edit_text(deployment_report_html(deployment), parse_mode="HTML")
         await message.answer(
             "What do you want to do next?", reply_markup=await _main_menu_for(message.from_user.id)
@@ -854,7 +1012,7 @@ async def project_view(callback: CallbackQuery) -> None:
         return
     proj_id_str = callback.data.split(":", 2)[2]
     async with container_scope() as c:
-        await c.access.require_active(callback.from_user.id)
+        user = await c.access.require_active(callback.from_user.id)
         try:
             from uuid import UUID
 
@@ -862,6 +1020,10 @@ async def project_view(callback: CallbackQuery) -> None:
             project = await c.projects.get_by_id(proj_id)
         except ValueError:
             project = None
+
+    if project and project.user_id != user.id and not user.is_super_admin:
+        await callback.answer("You do not have permission to view this project.", show_alert=True)
+        return
 
     if not project:
         await callback.answer("Project not found.", show_alert=True)
@@ -872,6 +1034,8 @@ async def project_view(callback: CallbackQuery) -> None:
         f"<b>Name:</b> {project.name}\n"
         f"<b>Stack:</b> {project.stack.value}\n"
         f"<b>Branch:</b> {project.branch}\n"
+        f"<b>Target:</b> {project.deployment_target.value}\n"
+        f"<b>Auto deploy:</b> {'On' if project.auto_deploy_enabled else 'Off'}\n"
         f"<b>Repo:</b> {project.repo_url}\n"
         f"<b>Live URL:</b> {project.live_url or 'None'}\n"
     )
@@ -883,13 +1047,78 @@ async def project_view(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("project:auto:"))
+async def project_auto_deploy(callback: CallbackQuery) -> None:
+    if not callback.from_user or not callback.data:
+        return
+    _, _, project_id, action = callback.data.split(":", 3)
+    enabled = action == "on"
+    try:
+        async with container_scope() as c:
+            user = await c.access.require_active(callback.from_user.id)
+            project = await c.deploy.set_auto_deploy(user, project_id, enabled)
+    except (LookupError, PermissionError, ValueError) as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    text = (
+        f"📦 <b>Project Details:</b>\n\n"
+        f"<b>Name:</b> {project.name}\n"
+        f"<b>Stack:</b> {project.stack.value}\n"
+        f"<b>Branch:</b> {project.branch}\n"
+        f"<b>Target:</b> {project.deployment_target.value}\n"
+        f"<b>Auto deploy:</b> {'On' if project.auto_deploy_enabled else 'Off'}\n"
+        f"<b>Repo:</b> {project.repo_url}\n"
+        f"<b>Live URL:</b> {project.live_url or 'None'}\n"
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=project_details_keyboard(project),
+        parse_mode="HTML",
+    )
+    await callback.answer("Auto deploy enabled" if enabled else "Auto deploy disabled")
+
+
+@router.callback_query(F.data.startswith("project:deploy:"))
+async def project_deploy_now(callback: CallbackQuery) -> None:
+    if not callback.from_user or not callback.data:
+        return
+    project_id = callback.data.rsplit(":", 1)[1]
+    try:
+        from uuid import UUID
+
+        async with container_scope() as c:
+            user = await c.access.require_active(callback.from_user.id)
+            project = await c.projects.get_by_id(UUID(project_id))
+            if not project:
+                raise LookupError("Project not found.")
+            if project.user_id != user.id and not user.is_super_admin:
+                raise PermissionError("You do not have permission to deploy this project.")
+            await callback.message.edit_text(
+                f"Deploying {project.name} to {project.deployment_target.value}..."
+            )
+            deployment = await c.deploy.deploy_existing(user, project_id)
+    except (LookupError, PermissionError, ValueError) as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.message.edit_text(
+        deployment_report_html(deployment),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="Back to Projects", callback_data="menu:projects")]
+            ]
+        ),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("project:del_prompt:"))
 async def project_delete_prompt(callback: CallbackQuery) -> None:
     if not callback.from_user:
         return
     proj_id_str = callback.data.split(":", 2)[2]
     async with container_scope() as c:
-        await c.access.require_active(callback.from_user.id)
+        user = await c.access.require_active(callback.from_user.id)
         try:
             from uuid import UUID
 
@@ -897,6 +1126,10 @@ async def project_delete_prompt(callback: CallbackQuery) -> None:
             project = await c.projects.get_by_id(proj_id)
         except ValueError:
             project = None
+
+    if project and project.user_id != user.id and not user.is_super_admin:
+        await callback.answer("You do not have permission to delete this project.", show_alert=True)
+        return
 
     if not project:
         await callback.answer("Project not found.", show_alert=True)
@@ -926,7 +1159,7 @@ async def project_delete_cancel(callback: CallbackQuery) -> None:
         return
     proj_id_str = callback.data.split(":", 2)[2]
     async with container_scope() as c:
-        await c.access.require_active(callback.from_user.id)
+        user = await c.access.require_active(callback.from_user.id)
         try:
             from uuid import UUID
 
@@ -935,12 +1168,18 @@ async def project_delete_cancel(callback: CallbackQuery) -> None:
         except ValueError:
             project = None
 
+    if project and project.user_id != user.id and not user.is_super_admin:
+        await callback.answer("You do not have permission to view this project.", show_alert=True)
+        return
+
     if project:
         text = (
             f"📦 <b>Project Details:</b>\n\n"
             f"<b>Name:</b> {project.name}\n"
             f"<b>Stack:</b> {project.stack.value}\n"
             f"<b>Branch:</b> {project.branch}\n"
+            f"<b>Target:</b> {project.deployment_target.value}\n"
+            f"<b>Auto deploy:</b> {'On' if project.auto_deploy_enabled else 'Off'}\n"
             f"<b>Repo:</b> {project.repo_url}\n"
             f"<b>Live URL:</b> {project.live_url or 'None'}\n"
         )
@@ -976,12 +1215,15 @@ async def project_delete_confirm(callback: CallbackQuery) -> None:
         user = await c.access.require_active(callback.from_user.id)
         success, msg = await c.deploy.delete_project(user, proj_id_str, on_log=_cleanup_log)
 
+    back_callback = "admin:users" if user.is_super_admin else "menu:projects"
+    back_label = "Back to All users" if user.is_super_admin else "Back to Projects"
+
     if success:
         await callback.message.edit_text(
             f"✅ <b>{msg}</b>\n\nAll server resources and database records have been completely removed.",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Back to Projects", callback_data="menu:projects")]
+                    [InlineKeyboardButton(text=back_label, callback_data=back_callback)]
                 ]
             ),
             parse_mode="HTML",
@@ -991,7 +1233,7 @@ async def project_delete_confirm(callback: CallbackQuery) -> None:
             f"❌ <b>Deletion failed:</b>\n{msg}",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Back to Projects", callback_data="menu:projects")]
+                    [InlineKeyboardButton(text=back_label, callback_data=back_callback)]
                 ]
             ),
             parse_mode="HTML",
@@ -1017,14 +1259,25 @@ async def pending(message: Message) -> None:
     if not users:
         await message.answer("No pending users.")
         return
-    await message.answer("\n".join(user_line(user) for user in users), parse_mode="HTML")
+    await message.answer(
+        "Pending users:\n" + "\n".join(user_line(user) for user in users),
+        reply_markup=pending_users_keyboard(users),
+        parse_mode="HTML",
+    )
 
 
 @router.message(Command("users"))
 async def users(message: Message) -> None:
     if not message.from_user:
         return
-    await message.answer(await _all_users_text(message.from_user.id), parse_mode="HTML")
+    async with container_scope() as c:
+        await c.access.require_super_admin(message.from_user.id)
+        rows = await c.access.all_users()
+    await message.answer(
+        f"<b>All users ({len(rows)}):</b>\n\nChoose a user to view their projects.",
+        reply_markup=admin_users_keyboard(rows),
+        parse_mode="HTML",
+    )
 
 
 @router.message(Command("add_user"))
@@ -1116,11 +1369,28 @@ async def access_callback(callback: CallbackQuery) -> None:
         await c.access.require_super_admin(callback.from_user.id)
         if action == "approve":
             user = await c.access.approve(telegram_id)
-            await callback.bot.send_message(telegram_id, "تم تفعيل حسابك. اكتب /setup أو /start.")
         else:
             user = await c.access.reject(telegram_id)
-            await callback.bot.send_message(telegram_id, "تم رفض طلب استخدام البوت.")
-    await callback.message.edit_text(f"{action.title()}d:\n{user_line(user)}", parse_mode="HTML")
+        remaining = await c.access.pending_users()
+    try:
+        notification = (
+            "تم تفعيل حسابك. اكتب /setup أو /start."
+            if action == "approve"
+            else "تم رفض طلب استخدام البوت."
+        )
+        await callback.bot.send_message(telegram_id, notification)
+    except TelegramAPIError:
+        logger.warning("telegram.user_status_notification_failed", telegram_id=telegram_id)
+    text = (
+        f"{action.title()}d {escape(user.full_name)}.\n\nNo pending users remaining."
+        if not remaining
+        else "Pending users:\n" + "\n".join(user_line(item) for item in remaining)
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=(pending_users_keyboard(remaining) if remaining else admin_panel_keyboard()),
+        parse_mode="HTML",
+    )
     await callback.answer()
 
 
@@ -1140,6 +1410,30 @@ async def _admin_status_command(message: Message, action: str) -> None:
         else:
             user = await c.access.suspend(int(raw_id))
     await message.answer(f"Done:\n{user_line(user)}", parse_mode="HTML")
+
+
+def _admin_project_text(
+    project: Project,
+    owner: User | None,
+    deployment: Deployment | None,
+) -> str:
+    owner_name = owner.full_name if owner else "Unknown user"
+    status = deployment.status.value if deployment else "not_deployed"
+    commit = deployment.commit_sha if deployment and deployment.commit_sha else "unknown"
+    updated = deployment.updated_at.strftime("%Y-%m-%d %H:%M UTC") if deployment else "Never"
+    return (
+        f"<b>Admin project details</b>\n\n"
+        f"Name: <b>{escape(project.name)}</b>\n"
+        f"Owner: {escape(owner_name)}\n"
+        f"Stack: <code>{escape(project.stack.value)}</code>\n"
+        f"Target: <code>{escape(project.deployment_target.value)}</code>\n"
+        f"Branch: <code>{escape(project.branch)}</code>\n"
+        f"Status: <code>{escape(status)}</code>\n"
+        f"Commit: <code>{escape(commit)}</code>\n"
+        f"Last update: {escape(updated)}\n"
+        f"Auto deploy: {'On' if project.auto_deploy_enabled else 'Off'}\n"
+        f"Live URL: {escape(project.live_url or 'None')}"
+    )
 
 
 async def _main_menu_for(telegram_id: int):
@@ -1178,6 +1472,8 @@ def _setup_text(saved: set[CredentialProvider]) -> str:
             CredentialProvider.GitHub,
             CredentialProvider.Server,
             CredentialProvider.Cloudflare,
+            CredentialProvider.Railway,
+            CredentialProvider.Firebase,
         )
         if provider not in saved
     ]
@@ -1187,18 +1483,18 @@ def _setup_text(saved: set[CredentialProvider]) -> str:
             CredentialProvider.GitHub,
             CredentialProvider.Server,
             CredentialProvider.Cloudflare,
+            CredentialProvider.Railway,
+            CredentialProvider.Firebase,
         )
         if provider in saved
     ]
     lines = ["Credential setup"]
     lines.append("")
     lines.append("Saved: " + (", ".join(saved_names) if saved_names else "none yet"))
-    lines.append(
-        "Missing: " + (", ".join(missing) if missing else "all required credentials are ready")
-    )
+    lines.append("Not added: " + (", ".join(missing) if missing else "none"))
     lines.append("")
     if missing:
-        lines.append("Choose the next missing credential, then paste it in the next message.")
+        lines.append("Add only the destinations you want to use.")
     else:
         lines.append("You are ready to deploy. Use Deploy project from the menu.")
     return "\n".join(lines)
@@ -1225,6 +1521,18 @@ def _credential_prompt(provider: CredentialProvider, action: str) -> str:
             "Paste as:\n"
             "host user ssh_key_path base_path public_base_url\n\n"
             "public_base_url is optional."
+        )
+    if provider == CredentialProvider.Railway:
+        return (
+            f"{verb} Railway credentials\n\n"
+            "Paste your Railway account token.\n"
+            "Optional format when you use multiple workspaces:\n"
+            "token workspace_id"
+        )
+    if provider == CredentialProvider.Firebase:
+        return (
+            f"{verb} Firebase credentials\n\n"
+            "Upload the service-account JSON file, or paste its full JSON content here."
         )
     return f"{verb} {provider_label(provider)} credentials."
 
@@ -1256,7 +1564,40 @@ def _parse_credential_payload(provider: CredentialProvider, text: str) -> dict:
             "public_base_url": args[4] if len(args) > 4 else settings.public_base_url,
         }
 
+    if provider == CredentialProvider.Railway:
+        if not args:
+            raise ValueError("Paste your Railway account token.")
+        return {
+            "token": args[0],
+            "workspace": args[1] if len(args) > 1 else None,
+        }
+
+    if provider == CredentialProvider.Firebase:
+        try:
+            service_account = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Send a valid Firebase service-account JSON file.") from exc
+        if not isinstance(service_account, dict):
+            raise ValueError("Firebase service-account content must be a JSON object.")
+        required = {"project_id", "client_email", "private_key"}
+        if not required.issubset(service_account):
+            raise ValueError(
+                "Firebase JSON must include project_id, client_email, and private_key."
+            )
+        return {
+            "project_id": service_account["project_id"],
+            "service_account": service_account,
+        }
+
     raise ValueError("Unsupported credential type.")
+
+
+def _target_provider(target: DeploymentTarget) -> CredentialProvider:
+    return {
+        DeploymentTarget.Server: CredentialProvider.Server,
+        DeploymentTarget.Railway: CredentialProvider.Railway,
+        DeploymentTarget.Firebase: CredentialProvider.Firebase,
+    }[target]
 
 
 def _parse_user_to_add(

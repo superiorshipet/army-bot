@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     DateTime,
     Enum,
     ForeignKey,
@@ -85,6 +86,11 @@ class ProjectModel(Base):
     branch: Mapped[str] = mapped_column(String(255), default="main")
     stack: Mapped[ProjectStack] = mapped_column(Enum(ProjectStack, native_enum=False))
     live_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    deployment_target: Mapped[str] = mapped_column(String(32), default="server")
+    auto_deploy_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_deployed_sha: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    last_triggered_sha: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    target_config: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
