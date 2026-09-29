@@ -54,6 +54,11 @@ async def test_analyzer_rejects_local_paths(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_analyzer_handles_missing_git_commit(tmp_path) -> None:
+    assert await FilesystemRepoAnalyzer._commit_sha(tmp_path) is None
+
+
+@pytest.mark.asyncio
 async def test_coordinator_limits_user_to_one_active_deployment() -> None:
     coordinator = DeploymentCoordinator()
     user_id = uuid4()

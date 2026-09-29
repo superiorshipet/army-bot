@@ -92,6 +92,23 @@ class FilesystemRepoAnalyzer:
         raise RuntimeError(err_text or "git clone failed")
 
     @staticmethod
+    async def _commit_sha(repo_path: Path) -> str | None:
+        process = await asyncio.create_subprocess_exec(
+            "git",
+            "rev-parse",
+            "HEAD",
+            cwd=str(repo_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await process.communicate()
+        if process.returncode != 0:
+            return None
+
+        commit_sha = stdout.decode(errors="replace").strip()
+        return commit_sha or None
+
+    @staticmethod
     def _project_name(repo_url: str, path: Path | None) -> str:
         if path:
             return path.name.replace(" ", "-").lower()
